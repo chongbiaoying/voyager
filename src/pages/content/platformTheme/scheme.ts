@@ -27,13 +27,13 @@ export const SCHEME_ATTR = 'data-gv-scheme';
 export type Scheme = 'light' | 'dark';
 
 /**
- * Attributes a host site flips when its theme changes. Every shipped adapter
- * signals through a class; `style` is here because a site can set a custom
- * property instead. `data-theme` and `data-color-scheme` are deliberately not
- * listed — the stylesheet carried rules for them for a long time and no host
- * has ever set either.
+ * Attributes a host site flips when its theme changes. Most adapters signal
+ * through a class and `style` is here because a site can set a custom property
+ * instead; ChatGPT rewrites `data-theme` on `<html>`. `data-color-scheme` is
+ * deliberately not listed — the stylesheet carried rules for it for a long time
+ * and no host has ever set it.
  */
-const WATCHED_ATTRIBUTES = ['class', 'style'];
+const WATCHED_ATTRIBUTES = ['class', 'style', 'data-theme'];
 
 const DARK_QUERY = '(prefers-color-scheme: dark)';
 

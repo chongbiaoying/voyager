@@ -48,6 +48,7 @@ import {
 import { hasPrimitive } from '../verbs/registry';
 import { DeclarativeEngine } from './declarativeEngine';
 import { PLUGIN_CATALOG_REFRESH_MESSAGE } from './messages';
+import { pluginDebug } from './pluginDebug';
 import { type PluginStatus, findIncompatibility } from './pluginStatus';
 
 export interface PluginHostOptions {
@@ -202,6 +203,11 @@ export class PluginHost {
         site: this.adapter?.id ?? 'unknown',
         manifests: this.manifests.length,
       });
+      pluginDebug('host', 'started', {
+        site: this.adapter?.id ?? null,
+        url: this.url,
+        manifests: this.manifests.map((manifest) => manifest.id),
+      });
       this.maybeRequestCatalogRefresh();
     } catch (error) {
       if (isExtensionContextInvalidatedError(error)) return;
@@ -337,6 +343,7 @@ export class PluginHost {
       const listed = new Set(manifests.map((manifest) => manifest.id));
       for (const id of previous.keys()) {
         if (!listed.has(id) && engine.isActive(id)) {
+          pluginDebug('host', 'plugin delisted by catalog reload', { id });
           engine.unmount(id);
           this.pushedSettings.delete(id);
         }
@@ -372,9 +379,11 @@ export class PluginHost {
       const isActive = engine.isActive(manifest.id);
       if (shouldRun && !isActive) {
         const settings = this.resolveSettings(manifest, state);
+        pluginDebug('host', 'plugin mount', { id: manifest.id, version: manifest.version });
         engine.mount(manifest, settings);
         this.pushedSettings.set(manifest.id, JSON.stringify(settings));
       } else if (!shouldRun && isActive) {
+        pluginDebug('host', 'plugin unmount', { id: manifest.id });
         engine.unmount(manifest.id);
         this.pushedSettings.delete(manifest.id);
       } else if (shouldRun && isActive) {
@@ -405,7 +414,10 @@ export class PluginHost {
 
   private async shouldActivate(manifest: PluginManifest, state: PluginStateMap): Promise<boolean> {
     if (!matchesAnyPattern(this.url, manifest.matches)) return false;
-    if (!state[manifest.id]?.enabled) return false;
+    if (!state[manifest.id]?.enabled) {
+      pluginDebug('host', 'plugin not activated', { id: manifest.id, reason: 'disabled' });
+      return false;
+    }
     const incompatibility = findIncompatibility({
       manifest,
       adapter: this.adapter,
@@ -415,6 +427,14 @@ export class PluginHost {
       logger.warn('Plugin skipped: incompatible with this build or site', {
         id: manifest.id,
         status: incompatibility.kind,
+        requiredEngine: incompatibility.requiredEngine,
+        missingHandlers: incompatibility.missingHandlers,
+        missingSemantic: incompatibility.missingSemantic,
+      });
+      pluginDebug('host', 'plugin not activated', {
+        id: manifest.id,
+        reason: 'incompatible',
+        kind: incompatibility.kind,
         requiredEngine: incompatibility.requiredEngine,
         missingHandlers: incompatibility.missingHandlers,
         missingSemantic: incompatibility.missingSemantic,

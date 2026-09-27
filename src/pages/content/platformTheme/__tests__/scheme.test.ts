@@ -27,9 +27,29 @@ afterEach(() => {
   stopScheme();
   document.documentElement.removeAttribute(SCHEME_ATTR);
   document.documentElement.className = '';
+  document.documentElement.removeAttribute('data-theme');
   document.body.className = '';
   document.body.replaceChildren();
 });
+
+/**
+ * Put a site into ITS OWN dark state, whatever dialect its descriptor uses —
+ * a class on <html>/<body> (Gemini, Claude, DeepSeek) or an attribute
+ * (ChatGPT's `html[data-theme="dark"]`) — and hand back the undo.
+ */
+function applyDark(theme: SiteThemeDescriptor): () => void {
+  const selector = theme.darkSelector;
+  const target = selector.startsWith('body') ? document.body : document.documentElement;
+  const attribute = /\[([\w-]+)=["']?([^"'\]]+)["']?\]$/.exec(selector);
+  if (attribute) {
+    target.setAttribute(attribute[1], attribute[2]);
+    return () => target.removeAttribute(attribute[1]);
+  }
+  target.className = selector.replace(/^(body|html|:root)\./, '');
+  return () => {
+    target.className = '';
+  };
+}
 
 describe('resolveScheme', () => {
   it('reads each shipped adapter its own way, DeepSeek included', () => {
@@ -43,13 +63,9 @@ describe('resolveScheme', () => {
     for (const [url, expected] of cases) {
       const theme = registry.resolveByUrl(url)?.theme;
       expect(theme, `${url} declares no theme`).toBeDefined();
-      // Put the site into ITS OWN dark state, whatever dialect that is.
-      const target = theme!.darkSelector.startsWith('body')
-        ? document.body
-        : document.documentElement;
-      target.className = theme!.darkSelector.replace(/^(body|html|:root)\./, '');
+      const undo = applyDark(theme!);
       expect(resolveScheme(theme, document), url).toBe(expected);
-      target.className = '';
+      undo();
     }
   });
 
@@ -89,6 +105,22 @@ describe('startScheme', () => {
     expect(getScheme()).toBe('dark');
 
     document.body.className = 'light';
+    await settle();
+    expect(getScheme()).toBe('light');
+
+    bridge.stop();
+  });
+
+  it('follows an attribute flip, the dialect ChatGPT themes through', async () => {
+    const chatgpt = SiteRegistry.createDefault().resolveByUrl('https://chatgpt.com/')?.theme;
+    const bridge = startScheme(chatgpt ?? null, document);
+    expect(getScheme()).toBe('light');
+
+    document.documentElement.setAttribute('data-theme', 'dark');
+    await settle();
+    expect(getScheme()).toBe('dark');
+
+    document.documentElement.setAttribute('data-theme', 'light');
     await settle();
     expect(getScheme()).toBe('light');
 

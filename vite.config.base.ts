@@ -12,6 +12,16 @@ import pkg from './package.json';
 
 const isDev = process.env.__DEV__ === 'true';
 const buildTarget = process.env.VOYAGER_BUILD_TARGET === 'edge' ? 'edge' : 'chrome';
+/** Dev builds carry the plugin diagnostics; an explicit opt-in enables them elsewhere. */
+const pluginDebug = isDev || process.env.VOYAGER_PLUGIN_DEBUG === '1';
+/**
+ * The published catalog describes the RELEASED plugin set. A development build
+ * runs the same extension version, so its cache entry is "authoritative" and a
+ * plugin still being written here — absent from the published list — would be
+ * deleted from the page the moment the background refresh lands. Snapshot-only
+ * is therefore the dev default; set an explicit value to exercise the channel.
+ */
+const remotePluginCatalog = process.env.VOYAGER_PLUGIN_CATALOG_REMOTE ?? (isDev ? 'off' : 'on');
 // set this flag to true, if you want localization support
 const localize = true;
 
@@ -51,9 +61,9 @@ export default defineConfig({
     'import.meta.env.VOYAGER_PLUGIN_CATALOG_URL': JSON.stringify(
       process.env.VOYAGER_PLUGIN_CATALOG_URL ?? '',
     ),
-    'import.meta.env.VOYAGER_PLUGIN_CATALOG_REMOTE': JSON.stringify(
-      process.env.VOYAGER_PLUGIN_CATALOG_REMOTE ?? 'on',
-    ),
+    'import.meta.env.VOYAGER_PLUGIN_CATALOG_REMOTE': JSON.stringify(remotePluginCatalog),
+    // Plugin-runtime diagnostics (src/features/plugins/runtime/pluginDebug.ts).
+    'import.meta.env.VOYAGER_PLUGIN_DEBUG': JSON.stringify(pluginDebug ? '1' : ''),
   },
   resolve: {
     alias: {

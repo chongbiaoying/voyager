@@ -29,11 +29,16 @@ describe('ChatGPT catalog timeline', () => {
     await vi.advanceTimersByTimeAsync(150);
   }
 
+  /** Mirrors the two role-scoped containers the ChatGPT thread renders. */
   function addMessage(text: string, role = 'user'): HTMLElement {
+    const turn = document.createElement('div');
+    turn.setAttribute('data-turn-key', text);
     const message = document.createElement('div');
-    message.dataset.messageAuthorRole = role;
+    if (role === 'user') message.setAttribute('data-user-message-bubble', '');
+    else message.setAttribute('data-chatgpt-selection-message-id', `msg-${text}`);
     message.textContent = text;
-    conversation.appendChild(message);
+    turn.appendChild(message);
+    conversation.appendChild(turn);
     return message;
   }
 
@@ -106,6 +111,31 @@ describe('ChatGPT catalog timeline', () => {
     dots()[0].click();
     expect(conversation.scrollTo).toHaveBeenCalledWith({
       top: 450,
+      behavior: expect.stringMatching(/^(smooth|instant)$/),
+    });
+    expect(window.scrollTo).not.toHaveBeenCalled();
+  });
+
+  // ChatGPT's thread rests at the END of the conversation, so it scrolls in
+  // negative offsets: 0 is the newest message, -(scrollHeight - clientHeight)
+  // the oldest. A jump that clamps to 0 lands on the newest message every time.
+  it('jumps through a column-reverse thread container into its negative range', async () => {
+    conversation.style.overflowY = 'auto';
+    conversation.style.flexDirection = 'column-reverse';
+    Object.defineProperties(conversation, {
+      clientHeight: { value: 600 },
+      scrollHeight: { value: 2000 },
+    });
+    conversation.scrollTo = vi.fn();
+    const message = addMessage('Oldest question');
+    // Resting offset 0 shows content from 1400 to 2000, so a turn at content
+    // offset 100 (its centre) is 1320px above the container's top edge.
+    message.getBoundingClientRect = () => ({ top: -1320, bottom: -1280, height: 40 }) as DOMRect;
+    await mount();
+    expect(conversation.scrollTop).toBe(0);
+    dots()[0].click();
+    expect(conversation.scrollTo).toHaveBeenCalledWith({
+      top: -1400,
       behavior: expect.stringMatching(/^(smooth|instant)$/),
     });
     expect(window.scrollTo).not.toHaveBeenCalled();

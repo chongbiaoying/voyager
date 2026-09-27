@@ -2,6 +2,7 @@ import { logger } from '@/core/services/LoggerService';
 
 import { PLUGIN_ENGINE_VERSION } from '../constants';
 import { HostCatalogSource } from '../remote/HostCatalogSource';
+import { pluginDebug } from '../runtime/pluginDebug';
 import { engineSatisfied } from '../semver';
 import { matchesAnyPattern } from '../sites/matchPattern';
 import type {
@@ -100,7 +101,18 @@ export function mergePluginRecords(input: MergePluginRecordsInput): SourcedPlugi
     }
     const targetsScope =
       !!input.scopeUrl && matchesAnyPattern(input.scopeUrl, record.manifest.matches);
-    if (input.remoteAuthoritative && targetsScope) continue;
+    if (input.remoteAuthoritative && targetsScope) {
+      // Kill switch: the host catalog is the truth for this page, so a snapshot
+      // plugin missing from it is delisted. Noisy for a locally-built plugin
+      // that has not been published yet — worth a diagnostic.
+      pluginDebug('catalog', 'snapshot plugin skipped: remote catalog is authoritative', {
+        id,
+        sourceId: record.sourceId,
+        scopeUrl: input.scopeUrl,
+        matches: record.manifest.matches,
+      });
+      continue;
+    }
     merged.push(record);
   }
 
@@ -109,6 +121,15 @@ export function mergePluginRecords(input: MergePluginRecordsInput): SourcedPlugi
     seen.add(record.manifest.id);
     merged.push(record);
   }
+
+  pluginDebug('catalog', 'merged plugin manifests', {
+    count: merged.length,
+    ids: merged.map((record) => record.manifest.id),
+    remoteAuthoritative: input.remoteAuthoritative,
+    snapshotCount: input.snapshot.length,
+    remoteCount: input.remote.length,
+    scopeUrl: input.scopeUrl,
+  });
 
   return merged;
 }

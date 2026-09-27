@@ -27,8 +27,11 @@ import { initI18n } from '@/utils/i18n';
 
 import { MAX_REGEX_INPUT_LENGTH } from '../../sites/safeRegex';
 import type { PrimitiveHandle } from '../types';
+import * as trace from './navTrace';
+import * as geom from './scrollGeometry';
 import {
   afterScrollSettles,
+  isReverseScroller,
   navigationScrollBehavior,
   scrollElementToAnchor,
   scrollToCenter,
@@ -181,6 +184,8 @@ export class TurnNavigator {
   private pendingNavigationProbed = false;
   private lastHandledHash: string | null = null;
   private scrollTarget: HTMLElement | Window | null = null;
+  /** Resolved with the target: `column-reverse` containers need offset translation. */
+  private scrollTargetReversed = false;
   private stopScrollListener: Dispose | null = null;
 
   private readonly barSelector: string;
@@ -225,6 +230,7 @@ export class TurnNavigator {
     );
     await initI18n().catch(() => {});
     if (this.disposed) return;
+    trace.started(this.config, this.buildConversationId());
     this.ensureUi();
     await this.refresh();
     if (this.disposed) return;
@@ -396,7 +402,8 @@ export class TurnNavigator {
   private async refresh(): Promise<void> {
     if (this.disposed) return;
     this.ensureUi();
-    if (this.buildConversationId() !== this.conversationId) this.resetConversationState();
+    const conversationChanged = this.buildConversationId() !== this.conversationId;
+    if (conversationChanged) this.resetConversationState();
     await this.loadStars();
     if (this.disposed) return;
     const previousIds = this.markers.map((marker) => marker.id);
@@ -411,6 +418,7 @@ export class TurnNavigator {
     this.applyStarredState();
     this.refreshActive();
     this.handleHash();
+    trace.turns(this.config, this.conversationId, conversationChanged, turns.length, this.markers);
   }
 
   private resetConversationState(): void {
@@ -831,6 +839,8 @@ export class TurnNavigator {
     void this.stopScrollListener?.();
     this.stopScrollListener = null;
     this.scrollTarget = target;
+    this.scrollTargetReversed = isReverseScroller(target);
+    trace.scrollTarget(this.config, target, this.scrollTargetReversed);
     if (target && !this.disposed) {
       this.stopScrollListener = this.scope.on(target, 'scroll', this.updateActiveFromScroll, {
         passive: true,
@@ -847,9 +857,10 @@ export class TurnNavigator {
 
   private navigateTo(turnId: string): void {
     const marker = this.findMarker(turnId);
-    if (!marker) return;
+    if (!marker) return trace.ignored(turnId);
     this.navigationActiveLockUntil = Date.now() + NAVIGATION_ACTIVE_LOCK_MS;
     this.setActiveTurn(marker.id);
+    trace.requested(marker, this.markers.indexOf(marker));
     if (marker.element.isConnected) {
       const center = this.computeElementCenter(marker.element);
       const anchorOffset = this.getViewportHeight() * ACTIVE_ANCHOR;
@@ -862,6 +873,7 @@ export class TurnNavigator {
           this.getScrollTop(),
           this.getViewportHeight(),
         );
+        trace.landed(marker.id, 'anchor', this.getScrollTop(), distance);
         return;
       }
       // Long jump to a mounted turn: Claude re-measures once the landing region
@@ -871,6 +883,7 @@ export class TurnNavigator {
       this.pendingNavigationProbed = true;
       const hop = (): void => this.schedulePendingNavigationHop();
       const behavior = navigationScrollBehavior();
+      trace.longJump(marker.id, distance, behavior);
       scrollToCenter(this.scrollTarget, center, this.getViewportHeight(), behavior);
       if (behavior !== 'smooth') hop();
       else {
@@ -887,6 +900,7 @@ export class TurnNavigator {
     // Virtualized out: the remembered offset is only an estimate (Claude
     // re-measures content as it mounts), so home in iteratively instead of
     // trusting a single jump.
+    trace.homing(marker.id);
     this.beginPendingNavigation(marker);
     this.homePendingNavigation();
   }
@@ -931,6 +945,7 @@ export class TurnNavigator {
     this.stopPendingNavigationTimer = null;
     if (!this.pendingNavigationId || this.disposed) return;
     if (Date.now() > this.pendingNavigationUntil) {
+      trace.homingTimedOut(this.pendingNavigationId);
       this.clearPendingNavigation();
       return;
     }
@@ -948,6 +963,7 @@ export class TurnNavigator {
         this.getScrollTop(),
         this.getViewportHeight(),
       );
+      trace.landed(marker.id, 'homing', this.getScrollTop());
       return;
     }
     const mountedIndexes = this.markers.reduce<number[]>((acc, item, index) => {
@@ -1026,10 +1042,8 @@ export class TurnNavigator {
   }
 
   private isElementInViewport(element: HTMLElement): boolean {
-    const rect = element.getBoundingClientRect();
     const top = this.getViewportTop();
-    const bottom = top + this.getViewportHeight();
-    return rect.bottom >= top && rect.top <= bottom;
+    return geom.elementInViewport(element, top, top + this.getViewportHeight());
   }
 
   private handleHash = (): void => {
@@ -1106,40 +1120,28 @@ export class TurnNavigator {
     scrollTop = this.getScrollTop(),
     viewportTop = this.getViewportTop(),
   ): number {
-    const rect = element.getBoundingClientRect();
-    return scrollTop + rect.top - viewportTop + rect.height / 2;
+    return geom.elementCenter(element, scrollTop, viewportTop);
   }
 
   private getViewportTop(): number {
-    return this.scrollTarget && this.scrollTarget !== window
-      ? (this.scrollTarget as HTMLElement).getBoundingClientRect().top
-      : 0;
+    return geom.viewportTop(this.scrollTarget);
   }
 
+  /** The reading offset every position in this class is compared in. */
   private getScrollTop(): number {
-    return this.scrollTarget && this.scrollTarget !== window
-      ? (this.scrollTarget as HTMLElement).scrollTop
-      : window.scrollY || document.documentElement.scrollTop || 0;
+    return geom.readingScrollTop(this.scrollTarget, this.scrollTargetReversed);
   }
 
   private getViewportHeight(): number {
-    return this.scrollTarget && this.scrollTarget !== window
-      ? (this.scrollTarget as HTMLElement).clientHeight
-      : window.innerHeight || document.documentElement.clientHeight || 0;
+    return geom.viewportHeight(this.scrollTarget);
   }
 
   private getScrollHeight(): number {
-    return this.scrollTarget && this.scrollTarget !== window
-      ? (this.scrollTarget as HTMLElement).scrollHeight
-      : (document.scrollingElement || document.documentElement).scrollHeight;
+    return geom.contentHeight(this.scrollTarget);
   }
 
   private isAtScrollBottom(): boolean {
-    const viewportHeight = this.getViewportHeight();
-    const scrollHeight = this.getScrollHeight();
-    return (
-      scrollHeight > viewportHeight && this.getScrollTop() + viewportHeight >= scrollHeight - 2
-    );
+    return geom.readingAtBottom(this.scrollTarget, this.scrollTargetReversed);
   }
 
   /**

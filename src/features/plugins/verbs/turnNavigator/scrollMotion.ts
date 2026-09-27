@@ -65,13 +65,61 @@ const ACTIVE_ANCHOR = 0.45;
 
 type ScrollTarget = HTMLElement | Window | null;
 
+/** The scroller's scrollable range: `scrollHeight - clientHeight`. */
+function scrollRange(container: HTMLElement): number {
+  return Math.max(0, container.scrollHeight - container.clientHeight);
+}
+
+/**
+ * A `flex-direction: column-reverse` scroller (ChatGPT's thread) runs its offset
+ * from 0 at the END of the content down to `-range` at its start, so the newest
+ * message sits at the resting position. Everything in the navigator measures in
+ * an ordinary offset that grows toward the end of the conversation, so such a
+ * container is translated into that space on the way in and back out on the way
+ * out; without it every jump lands on `Math.max(0, …)` — the newest message.
+ *
+ * The direction is a style, and a style is what decides where a scroller rests,
+ * so it is read rather than probed by moving the page.
+ */
+export function isReverseScroller(target: ScrollTarget): boolean {
+  if (!target || target === window) return false;
+  const container = target as HTMLElement;
+  try {
+    // Negative offsets only exist on a reverse scroller, whatever its styles say.
+    if (container.scrollTop < 0) return true;
+    if (getComputedStyle(container).flexDirection === 'column-reverse') return true;
+    const content = container.firstElementChild;
+    return (
+      content instanceof HTMLElement && getComputedStyle(content).flexDirection === 'column-reverse'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** A raw `scrollTop` in the navigator's growing-toward-the-end coordinate. */
+export function toReadingOffset(
+  container: HTMLElement,
+  scrollTop: number,
+  reverse: boolean,
+): number {
+  return reverse ? scrollTop + scrollRange(container) : scrollTop;
+}
+
+/** Back to a raw offset, clamped to the axis the container actually has. */
+function toDeviceOffset(container: HTMLElement, top: number, reverse: boolean): number {
+  if (!reverse) return Math.max(0, top);
+  const range = scrollRange(container);
+  return Math.min(0, Math.max(-range, top - range));
+}
+
 function applyScroll(target: ScrollTarget, top: number, behavior: ScrollBehavior): void {
-  const clamped = Math.max(0, top);
   if (!target || target === window) {
-    window.scrollTo({ top: clamped, behavior });
+    window.scrollTo({ top: Math.max(0, top), behavior });
     return;
   }
   const container = target as HTMLElement;
+  const clamped = toDeviceOffset(container, top, isReverseScroller(container));
   if (container.scrollTo) container.scrollTo({ top: clamped, behavior });
   else container.scrollTop = clamped;
 }
@@ -90,6 +138,9 @@ export function scrollToCenter(
  * The ordinary jump: the turn is mounted and near, so it glides. The instant
  * landings elsewhere are the ones a homing loop has to re-aim, where an
  * animation fights the correction.
+ *
+ * `scrollTop` is the caller's reading offset, so the container branch builds a
+ * reading offset too and lets `applyScroll` translate it back.
  */
 export function scrollElementToAnchor(
   target: HTMLElement | Window,
@@ -110,7 +161,7 @@ export function scrollElementToAnchor(
   const container = target as HTMLElement;
   const containerRect = container.getBoundingClientRect();
   const top =
-    container.scrollTop +
+    scrollTop +
     rect.top -
     containerRect.top -
     container.clientHeight * ACTIVE_ANCHOR +
