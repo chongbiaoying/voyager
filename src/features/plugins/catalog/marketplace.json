@@ -47,6 +47,11 @@
       "name": "deepseek-wrap-code",
       "source": "sites/deepseek/plugins/wrap-code/plugin.json",
       "official": true
+    },
+    {
+      "name": "chatgpt-timeline",
+      "source": "sites/chatgpt/plugins/timeline/plugin.json",
+      "official": true
     }
   ]
 }
