@@ -139,3 +139,15 @@ behavior, or bundled public assets.
 - **Guard:** `src/core/utils/__tests__/firefoxCssFloor.test.ts` strips comments and `@supports`
   blocks, then matches a feature-to-version table against the whole remaining stylesheet text, and
   asserts the manifest and the Firefox build config declare the same floor.
+
+## Windows test workers and fixture paths keep the standard parallel gate
+
+- **Trap:** Windows fork workers intermittently failed to load transformed modules. Unix-shaped
+  fixture labels and symlink creation also failed on Windows; native path separators made an
+  allowed embedded provisioning profile look forbidden.
+- **Rule:** Use isolated parallel thread workers on Windows, preserving the default file
+  parallelism. Fixtures normalize path labels and use directory junctions on Windows. Privacy
+  checks normalize separators only; misplaced profiles and private keys must still be rejected.
+- **Guard:** `bun run test`, `src/features/plugins/manifest/schema.test.ts`,
+  `scripts/__tests__/check-file-size.test.ts` and
+  `scripts/__tests__/verify-release-privacy.test.ts`.

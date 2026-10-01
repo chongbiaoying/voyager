@@ -26,7 +26,11 @@ describe('release privacy verification', () => {
     mkdirSync(externalDirectory);
     writeFileSync(join(artifact, 'safe.txt'), 'safe release content');
     writeFileSync(join(externalDirectory, 'private.txt'), '/Users/private-owner/secret');
-    symlinkSync(externalDirectory, join(artifact, 'Applications'));
+    symlinkSync(
+      externalDirectory,
+      join(artifact, 'Applications'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
     const result = runScanner(artifact);
 
@@ -52,5 +56,29 @@ describe('release privacy verification', () => {
     const unexpectedProfileResult = runScanner(tempRoot);
     expect(unexpectedProfileResult.status).toBe(1);
     expect(unexpectedProfileResult.stderr).toContain('forbidden release filename');
+  });
+
+  it('rejects embedded provisioning profiles outside app content directories', () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'voyager-release-privacy-'));
+    tempRoots.push(tempRoot);
+    writeFileSync(join(tempRoot, 'embedded.provisionprofile'), 'unexpected profile content');
+
+    const result = runScanner(tempRoot);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('forbidden release filename');
+  });
+
+  it('still scans allowed embedded provisioning profiles for private content', () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'voyager-release-privacy-'));
+    tempRoots.push(tempRoot);
+    const contents = join(tempRoot, 'Voyager.app', 'Contents');
+    mkdirSync(contents, { recursive: true });
+    writeFileSync(join(contents, 'embedded.provisionprofile'), '-----BEGIN PRIVATE KEY-----');
+
+    const result = runScanner(tempRoot);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('contains private key');
   });
 });

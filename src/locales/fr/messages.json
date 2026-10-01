@@ -3117,5 +3117,21 @@
   "popupPinHintDismiss": {
     "message": "Fermer",
     "description": "Popup: dismiss the pin reminder"
+  },
+  "timelineNavigationPending": {
+    "message": "Localisation du message…",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationUnavailable": {
+    "message": "Impossible de localiser ce message. Vous pouvez réessayer.",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationRetry": {
+    "message": "Réessayer",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineHistoryLoadedOnly": {
+    "message": "Seuls les messages chargés sont indexés.",
+    "description": "ChatGPT timeline navigation feedback"
   }
 }

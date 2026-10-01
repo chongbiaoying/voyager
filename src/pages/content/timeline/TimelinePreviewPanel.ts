@@ -4,6 +4,10 @@ import { StorageKeys } from '@/core/types/common';
 import { GV_RTL_CLASS, detectRTL } from '@/core/utils/rtl';
 
 import { getTranslationSync } from '../../../utils/i18n';
+import {
+  PREVIEW_VIRTUAL_THRESHOLD,
+  TimelinePreviewVirtualList,
+} from './TimelinePreviewVirtualList';
 import type { PreviewMarkerData } from './types';
 
 const SEARCH_DEBOUNCE_MS = 200;
@@ -20,6 +24,11 @@ const PREVIEW_HOVER_BRIDGE_VISIBLE_CLASS = 'gv-timeline-preview-hover-bridge-vis
 
 const LIST_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`;
 
+export interface TimelinePreviewPanelOptions {
+  readonly virtualizeLongLists?: boolean;
+  readonly historyNotice?: string;
+}
+
 export class TimelinePreviewPanel {
   private panelEl: HTMLElement | null = null;
   private hoverBridgeEl: HTMLElement | null = null;
@@ -30,6 +39,8 @@ export class TimelinePreviewPanel {
   private _isPinned = false;
   private _isCompactMode = false;
   private floatingToggleSuppressed = false;
+  private surfaceVisible = true;
+  private virtualList: TimelinePreviewVirtualList | null = null;
   private markers: ReadonlyArray<PreviewMarkerData> = [];
   private filteredMarkers: ReadonlyArray<PreviewMarkerData> = [];
   private activeTurnId: string | null = null;
@@ -70,7 +81,10 @@ export class TimelinePreviewPanel {
     | ((changes: Record<string, browser.Storage.StorageChange>, areaName: string) => void)
     | null = null;
 
-  constructor(private readonly anchorElement: HTMLElement) {}
+  constructor(
+    private readonly anchorElement: HTMLElement,
+    private readonly options: TimelinePreviewPanelOptions = {},
+  ) {}
 
   get isOpen(): boolean {
     return this._isOpen;
@@ -154,6 +168,41 @@ export class TimelinePreviewPanel {
     this.syncFloatingToggleVisibility();
   }
 
+  /** Drop every transient view and pending interaction belonging to the old chat. */
+  resetConversation(): void {
+    this.close();
+    this._isPinned = false;
+    this.markers = [];
+    this.filteredMarkers = [];
+    this.activeTurnId = null;
+    this.searchQuery = '';
+    this.anchorWasOpenOnPointerDown = null;
+    if (this.searchInput) this.searchInput.value = '';
+    if (this.listEl) {
+      this.listEl.textContent = '';
+      this.listEl.scrollTop = 0;
+    }
+    if (this.resizeDebounceTimer !== null) {
+      clearTimeout(this.resizeDebounceTimer);
+      this.resizeDebounceTimer = null;
+    }
+  }
+
+  /** Conversation owners can hide all auxiliary surfaces during a route handoff. */
+  setSurfaceVisible(visible: boolean): void {
+    this.surfaceVisible = visible;
+    if (!visible) {
+      this.close();
+      if (this.resizeDebounceTimer !== null) {
+        clearTimeout(this.resizeDebounceTimer);
+        this.resizeDebounceTimer = null;
+      }
+    }
+    if (this.panelEl) this.panelEl.hidden = !visible;
+    if (this.hoverBridgeEl) this.hoverBridgeEl.hidden = !visible;
+    this.syncFloatingToggleVisibility();
+  }
+
   toggle(): void {
     if (this._isOpen) {
       this.close();
@@ -163,7 +212,7 @@ export class TimelinePreviewPanel {
   }
 
   open(): void {
-    if (this._isOpen || !this.panelEl) return;
+    if (!this.surfaceVisible || this._isOpen || !this.panelEl) return;
     this._isOpen = true;
     this.renderList();
     this.positionPanel();
@@ -175,13 +224,14 @@ export class TimelinePreviewPanel {
   }
 
   close(): void {
-    if (!this._isOpen || !this.panelEl) return;
+    this.cancelCompactClose();
+    this.cancelSearch();
     this.cancelLongPress();
     this.longPressTriggeredTurnId = null;
     this.suppressClickTurnId = null;
     this.suppressClickUntil = 0;
     this._isOpen = false;
-    this.panelEl.classList.remove('visible');
+    this.panelEl?.classList.remove('visible');
     this.hoverBridgeEl?.classList.remove(PREVIEW_HOVER_BRIDGE_VISIBLE_CLASS);
     this.toggleBtn?.classList.remove('active');
     this.toggleBtn?.setAttribute('aria-pressed', 'false');
@@ -191,6 +241,7 @@ export class TimelinePreviewPanel {
       this.searchQuery = '';
       this.filteredMarkers = this.markers;
     }
+    this.virtualList?.clear();
     this.onSearchChange?.('');
   }
 
@@ -199,10 +250,9 @@ export class TimelinePreviewPanel {
     this.longPressTriggeredTurnId = null;
     this.suppressClickTurnId = null;
     this.suppressClickUntil = 0;
-    if (this.searchDebounceTimer) {
-      clearTimeout(this.searchDebounceTimer);
-      this.searchDebounceTimer = null;
-    }
+    this.cancelSearch();
+    this.virtualList?.destroy();
+    this.virtualList = null;
     if (this.resizeDebounceTimer !== null) {
       clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
@@ -330,6 +380,13 @@ export class TimelinePreviewPanel {
     this.hoverBridgeEl.className = PREVIEW_HOVER_BRIDGE_CLASS;
     this.hoverBridgeEl.setAttribute('aria-hidden', 'true');
 
+    if (this.options.historyNotice) {
+      const notice = document.createElement('div');
+      notice.className = 'gv-timeline-preview-history-notice';
+      notice.textContent = this.options.historyNotice;
+      this.panelEl.appendChild(notice);
+    }
+
     // Search section
     const searchWrapper = document.createElement('div');
     searchWrapper.className = 'timeline-preview-search';
@@ -346,6 +403,13 @@ export class TimelinePreviewPanel {
     // List
     this.listEl = document.createElement('div');
     this.listEl.className = 'timeline-preview-list';
+    if (this.options.virtualizeLongLists) {
+      this.virtualList = new TimelinePreviewVirtualList(
+        this.listEl,
+        (marker) => this.createItem(marker),
+        () => this.cancelLongPress(),
+      );
+    }
     this.setupScrollIsolation();
     this.panelEl.appendChild(this.listEl);
 
@@ -355,7 +419,8 @@ export class TimelinePreviewPanel {
 
   private syncFloatingToggleVisibility(): void {
     if (!this.toggleBtn) return;
-    this.toggleBtn.hidden = this._isCompactMode || this.floatingToggleSuppressed;
+    this.toggleBtn.hidden =
+      !this.surfaceVisible || this._isCompactMode || this.floatingToggleSuppressed;
   }
 
   private setupEventListeners(): void {
@@ -387,7 +452,8 @@ export class TimelinePreviewPanel {
     document.addEventListener('keydown', this.onKeyDown);
 
     this.onListPointerDown = (event: PointerEvent) => {
-      if (!this.onToggleStar || event.isPrimary === false) return;
+      if (!this.surfaceVisible || !this._isOpen || !this.onToggleStar || event.isPrimary === false)
+        return;
       if (typeof event.button === 'number' && event.button !== 0) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
@@ -452,7 +518,10 @@ export class TimelinePreviewPanel {
       this.resizeDebounceTimer = window.setTimeout(() => {
         this.resizeDebounceTimer = null;
         this.positionToggle();
-        if (this._isOpen) this.positionPanel();
+        if (this._isOpen) {
+          this.positionPanel();
+          this.virtualList?.refresh();
+        }
       }, RESIZE_DEBOUNCE_MS);
     };
     window.addEventListener('resize', this.onWindowResize);
@@ -537,7 +606,7 @@ export class TimelinePreviewPanel {
   }
 
   private scheduleCompactClose(): void {
-    if (!this._isCompactMode || this._isPinned) return;
+    if (!this.surfaceVisible || !this._isOpen || !this._isCompactMode || this._isPinned) return;
     this.cancelCompactClose();
     this.compactCloseTimer = window.setTimeout(() => {
       this.compactCloseTimer = null;
@@ -682,19 +751,30 @@ export class TimelinePreviewPanel {
   }
 
   private handleSearchInput(): void {
-    if (this.searchDebounceTimer) {
-      clearTimeout(this.searchDebounceTimer);
-    }
+    if (!this.surfaceVisible || !this._isOpen) return;
+    this.cancelSearch();
     this.searchDebounceTimer = window.setTimeout(() => {
       this.searchDebounceTimer = null;
       this.searchQuery = this.searchInput?.value.trim() ?? '';
+      if (this.listEl) this.listEl.scrollTop = 0;
       this.applyFilter();
     }, SEARCH_DEBOUNCE_MS);
   }
 
+  private cancelSearch(): void {
+    if (this.searchDebounceTimer === null) return;
+    clearTimeout(this.searchDebounceTimer);
+    this.searchDebounceTimer = null;
+  }
+
   private renderList(): void {
-    if (!this.listEl) return;
+    if (!this._isOpen || !this.listEl) return;
     this.cancelLongPress();
+    if (this.virtualList && this.filteredMarkers.length > PREVIEW_VIRTUAL_THRESHOLD) {
+      this.virtualList.setMarkers(this.filteredMarkers);
+      return;
+    }
+    this.virtualList?.clear();
     this.listEl.textContent = '';
 
     if (this.filteredMarkers.length === 0) {
@@ -743,6 +823,7 @@ export class TimelinePreviewPanel {
     item.appendChild(text);
 
     item.addEventListener('click', (event) => {
+      if (!this.surfaceVisible || !this._isOpen || !this.listEl?.contains(item)) return;
       if (this.suppressClickTurnId === marker.id && Date.now() < this.suppressClickUntil) {
         event.preventDefault();
         event.stopPropagation();
@@ -804,6 +885,10 @@ export class TimelinePreviewPanel {
 
   private scrollActiveIntoView(): void {
     if (!this.listEl || !this.activeTurnId) return;
+    if (this.virtualList && this.filteredMarkers.length > PREVIEW_VIRTUAL_THRESHOLD) {
+      this.virtualList.scrollToTurn(this.activeTurnId);
+      return;
+    }
     const activeItem = this.listEl.querySelector(
       '.timeline-preview-item.active',
     ) as HTMLElement | null;
@@ -815,7 +900,13 @@ export class TimelinePreviewPanel {
     for (let i = 0; i < newMarkers.length; i++) {
       const a = this.markers[i];
       const b = newMarkers[i];
-      if (a.id !== b.id || a.summary !== b.summary || a.starred !== b.starred) return false;
+      if (
+        a.id !== b.id ||
+        a.summary !== b.summary ||
+        a.starred !== b.starred ||
+        a.index !== b.index
+      )
+        return false;
     }
     return true;
   }

@@ -6,6 +6,7 @@
 import { logger } from '@/core/services/LoggerService';
 
 import type { ManifestIssue } from '../manifest/validate';
+import { ChatGptTimelineProvider } from '../sites/adapters/chatgptTurns';
 import { isSafeRegexSource } from '../sites/safeRegex';
 import { getPrimitiveContract } from './contracts';
 import {
@@ -111,12 +112,17 @@ export const turnNavigatorPrimitive: Primitive<TurnNavigatorParams> = {
       siteLabel: adapter?.label ?? 'Conversation',
       turnSelector,
       conversationIdPattern: params.conversationIdPattern ?? adapter?.conversationIdPattern,
-      scrollContainerSelector: params.scrollContainer,
+      scrollContainerSelector: params.scrollContainer ?? adapter?.selectors.scrollContainer,
       yieldWhenSelector: params.yieldWhen,
       position: params.position ?? 'right',
       pluginId: context.pluginId,
       coachmarkId: TIMELINE_STYLE_COACHMARK_ID,
     };
-    return activateTurnNavigator(scope, config, context.settings);
+    return activateTurnNavigator(
+      scope,
+      config,
+      context.settings,
+      adapter?.id === 'chatgpt' ? new ChatGptTimelineProvider(context.doc) : undefined,
+    );
   },
 };

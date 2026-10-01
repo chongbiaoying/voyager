@@ -3117,5 +3117,21 @@
   "popupPinHintDismiss": {
     "message": "關閉",
     "description": "Popup: dismiss the pin reminder"
+  },
+  "timelineNavigationPending": {
+    "message": "正在定位訊息…",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationUnavailable": {
+    "message": "暫時無法定位這則訊息，可以重試。",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationRetry": {
+    "message": "重試",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineHistoryLoadedOnly": {
+    "message": "僅索引已載入的訊息。",
+    "description": "ChatGPT timeline navigation feedback"
   }
 }

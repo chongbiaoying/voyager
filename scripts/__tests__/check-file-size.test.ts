@@ -63,12 +63,21 @@ describe('file-size ratchet', () => {
     expect(result.shrunk.sort()).toEqual(['src/gone.ts', 'src/now-small.ts']);
   });
 
-  it('skips symlinks, so a cyclic directory link or a linked file outside src cannot be measured', () => {
+  it('skips symlinks, so cyclic or external source links cannot be measured', () => {
     writeBaseline({});
     writeSource('src/small.ts', 3);
     writeSource('outside/big.ts', 12);
-    symlinkSync('.', path.join(root, 'src/loop'), 'dir');
-    symlinkSync(path.join(root, 'outside/big.ts'), path.join(root, 'src/linked.ts'), 'file');
+    symlinkSync(
+      path.join(root, 'src'),
+      path.join(root, 'src/loop'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    if (process.platform === 'win32') {
+      // Junctions exercise external-source isolation without Windows symlink privileges.
+      symlinkSync(path.join(root, 'outside'), path.join(root, 'src/linked'), 'junction');
+    } else {
+      symlinkSync(path.join(root, 'outside/big.ts'), path.join(root, 'src/linked.ts'), 'file');
+    }
 
     const result = checkFileSizes(root);
     expect(result.errors).toEqual([]);

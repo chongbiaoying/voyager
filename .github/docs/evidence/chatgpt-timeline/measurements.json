@@ -1,0 +1,86 @@
+{
+  "date": "2026-10-01",
+  "timezone": "Asia/Shanghai",
+  "extension": {
+    "name": "Voyager (Dev)",
+    "version": "1.9.0",
+    "loadedDirectory": "dist_chrome_dev"
+  },
+  "baseline": {
+    "homeUserNodes": 0,
+    "railVisible": true,
+    "compactBeforeOpacity": 1
+  },
+  "updated": {
+    "compactBeforeOpacity": 0,
+    "nativeIdentityPrefix": "cg-",
+    "differentConversationsInSeparateWindows": {
+      "firstNodes": 1,
+      "secondNodes": 2,
+      "firstScrollTopAfterSecondJump": 0
+    },
+    "reverseScrollerJump": {
+      "scrollTop": -19204.36328125,
+      "viewportHeight": 887,
+      "targetCenter": 399.18182373046875,
+      "expectedAnchor": 399.15,
+      "statusHidden": true
+    },
+    "modeSwitches": {
+      "count": 20,
+      "failures": 0,
+      "existingButtonIdentityPreserved": true,
+      "originalCompactSettingRestored": true
+    }
+  },
+  "screenshots": {
+    "delivered": false,
+    "reason": "Browser capture failed; native capture was invalid and removed."
+  },
+  "cleanup": {
+    "ownedChatTabsClosed": 2,
+    "temporaryThemeAndRedactionStylesRemoved": true
+  },
+  "automated": {
+    "bun": "1.3.12",
+    "node": "v25.9.0",
+    "parallelTestFiles": 420,
+    "parallelTests": 4224,
+    "allPassed": true,
+    "chromeProductionBuild": true,
+    "chromeDevelopmentBuild": true
+  },
+  "limitations": [
+    "Actual 60+ user-turn virtualization and native edited/answer branches still need a suitable existing conversation.",
+    "Existing real-data coexistence, streaming responses, themes/zoom, screenshots and sustained performance budgets remain unverified.",
+    "No user acceptance, commit, push or PR delivery yet."
+  ],
+  "followup": {
+    "date": "2026-10-01",
+    "automated": {
+      "bun": "1.3.12",
+      "parallelTestFiles": 422,
+      "parallelTests": 4242,
+      "allPassed": true,
+      "durationSeconds": 93.75,
+      "chromeDevelopmentBuildSeconds": 23.3,
+      "chromeProductionBuildSeconds": 20.82
+    },
+    "controlledFixture": {
+      "nodes": 500,
+      "paintedTicks": 102,
+      "longPromptHeightPx": 1800,
+      "longPromptTopInsetPx": 32,
+      "longPromptActiveCorrect": true,
+      "sameConversationTwoWindows": {
+        "starSynchronized": true,
+        "secondScrollTopBefore": 600,
+        "secondScrollTopAfter": 600,
+        "testStarsRemoved": true
+      }
+    },
+    "modernCreationEvidenceHandoffImplemented": true,
+    "screenshotsDelivered": false,
+    "scope": "Controlled local DOM fixtures in real Chrome and Voyager extension; no messages sent or edited."
+  }
+}

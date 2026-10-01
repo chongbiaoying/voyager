@@ -315,3 +315,31 @@ while an active plugin has domOps`).
   companion id into an unregister call.
 - **Guard:** `src/pages/background/__tests__/contentScriptRegistration.test.ts`
   (`drops only the ids that exist so a never-registered companion cannot block the batch`).
+
+## ChatGPT native identity cannot be inferred from prompt text or DOM position
+
+- **Trap:** Repeated prompt text shared a hash identity, modern `data-turn-key` wrapped both user
+  and assistant messages, and route-first transitions could assign old DOM to a new conversation.
+  Bookkeeping roots and unknown shells are not evidence of user-message identity.
+- **Rule:** Use the DOM-only shared provider and a per-document registry. Native IDs use `cg-`,
+  unstable IDs use page-local `ct-`; only confirmed current shells are visible. A known user shell
+  may keep its cached summary when its body unmounts. Branch hiding never deletes star records.
+  Legacy aliases require unique compatible evidence. Conversation generations guard reads,
+  long presses and navigation. Temporary stars require confirmed formal DOM ownership before
+  persistence; do not blindly promote matching old DOM after a route change.
+- **Guard:** `src/features/plugins/sites/adapters/chatgptTurns.test.ts`,
+  `src/features/plugins/verbs/turnNavigator/chatgptRegistry.test.ts` and
+  `src/features/plugins/verbs/turnNavigatorSessionIntegration.test.ts`.
+
+## A new ChatGPT conversation needs creation evidence before retaining temporary shells
+
+- **Trap:** Modern ChatGPT retains its first UUID shell when an empty home page acquires a formal
+  URL. Blocking all previous IDs hid legitimate new conversations indefinitely, while accepting
+  all matching IDs would assign stale temporary DOM to a manually opened old conversation.
+- **Rule:** Retain first-message shells only after a scoped trusted native-composer submission
+  observed on an empty page. Match the draft, formal route namespace/account and one unambiguous
+  native user message within ten seconds. Navigation clicks, history traversal, teardown and
+  expiry cancel the evidence. Never send or clear the composer from this observer; temporary-chat
+  query sessions and synthetic events cannot prove normal conversation creation.
+- **Guard:** `src/features/plugins/sites/adapters/newConversationHandoff.test.ts` and
+  `src/features/plugins/verbs/turnNavigatorSessionIntegration.test.ts`.

@@ -6,6 +6,9 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/tests/setup.ts'],
+    // Avoid intermittent transformed-module loading failures in Windows forks.
+    // Threads transfer code directly and retain parallel test isolation.
+    pool: process.platform === 'win32' ? 'threads' : 'forks',
     // Vitest stubs CSS imports to '' unless the file is listed here, which
     // also swallows `?raw` imports. The bundled plugin catalog is plain CSS
     // read as text, so let Vite serve it for real; app CSS stays stubbed.

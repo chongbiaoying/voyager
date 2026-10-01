@@ -1,20 +1,5 @@
-/**
- * TurnNavigator — the conversation timeline rail behind the `turnNavigator`
- * primitive (plan §6). This is the Claude timeline's engine, parameterised by
- * a `TurnNavigatorConfig` instead of Claude-specific constants:
- *
- *   - `turnSelector` picks the user turns (normally the adapter's `userTurn`);
- *   - `conversationIdPattern` + `siteId` build the starred-message conversation
- *     id (`<siteId>:conv:<id>`), so different sites never share star storage;
- *   - `scrollContainerSelector` pins the scrolling element when auto-detection
- *     is not good enough; `yieldWhenSelector` keeps the onboarding guide closed
- *     while, say, an artifact frame is open; `position` picks the rail side.
- *
- * Markers are accumulated across refreshes by content hash so virtualised
- * conversations (Claude, DeepSeek) never lose turns; see the merge notes below.
- */
+/** Composes scoped conversation identity, registry, rail and navigation owners. */
 import { StorageKeys, type TimelineStyle } from '@/core/types/common';
-import { hashString } from '@/core/utils/hash';
 import { type Dispose, PluginScope } from '@/features/plugins/runtime/pluginScope';
 import { setPluginSetting } from '@/features/plugins/storage/pluginState';
 import type { PluginSettings } from '@/features/plugins/types';
@@ -23,20 +8,36 @@ import { TimelinePreviewPanel } from '@/pages/content/timeline/TimelinePreviewPa
 import type { StarredMessage } from '@/pages/content/timeline/starredTypes';
 import { showTimelineStyleCoachmark } from '@/pages/content/timeline/timelineStyleCoachmark';
 import type { PreviewMarkerData } from '@/pages/content/timeline/types';
-import { initI18n } from '@/utils/i18n';
+import { watchRouteChanges } from '@/pages/content/utils/routeWatcher';
+import { initI18n, getTranslationSync } from '@/utils/i18n';
 
-import { MAX_REGEX_INPUT_LENGTH } from '../../sites/safeRegex';
+import { ChatGptTimelineProvider } from '../../sites/adapters/chatgptTurns';
+import { observeNewConversationSubmission } from '../../sites/adapters/newConversationHandoff';
+import { ChatGptNavigationController } from './chatgptNavigation';
+import { ChatGptTimelineRegistry } from './chatgptRegistry';
+import { buildConversationId } from './conversationIdentity';
+import { ConversationSession } from './conversationSession';
+import { NavigationFeedback } from './navigationFeedback';
+import { showTurnTooltip } from './tooltipPresentation';
+export {
+  buildConversationId,
+  buildTurnId,
+  buildClaudeConversationId,
+  buildClaudeTurnId,
+  extractClaudeTurnHash,
+  hasOpenClaudeArtifact,
+} from './conversationIdentity';
 import type { PrimitiveHandle } from '../types';
+import { readingMarkerId } from './activeMarker';
+import { LegacyNavigationController } from './legacyNavigation';
+import { mergeLegacyTurns } from './legacyRegistry';
+import type { Dot, Marker } from './markerTypes';
 import * as trace from './navTrace';
+import { renderTimelineDots, compactMarkerOffsets } from './railRendering';
 import * as geom from './scrollGeometry';
-import {
-  afterScrollSettles,
-  isReverseScroller,
-  navigationScrollBehavior,
-  scrollElementToAnchor,
-  scrollToCenter,
-} from './scrollMotion';
+import { isReverseScroller } from './scrollMotion';
 import { extractTurnHash, StarSnapshotLoader } from './starSnapshot';
+import { TimelineLayoutObserver } from './timelineLayout';
 export { extractTurnHash } from './starSnapshot';
 
 export interface TurnNavigatorConfig {
@@ -55,11 +56,7 @@ export interface TurnNavigatorConfig {
   readonly coachmarkId: string;
 }
 
-/**
- * Shared across sites on purpose: the guide explains one Voyager feature, and
- * the id keeps the name users' `COACHMARKS_SEEN` already carry from Claude so
- * nobody sees it twice.
- */
+/** Shared guide ID preserves Claude's existing COACHMARKS_SEEN key across sites. */
 export const TIMELINE_STYLE_COACHMARK_ID = 'claude-timeline-compact-style-intro-v1';
 
 export const TURN_ID_ATTR = 'data-gv-turn-id';
@@ -70,91 +67,7 @@ const LONG_PRESS_MS = 550;
 const ACTIVE_ANCHOR = 0.45;
 const NAVIGATION_ACTIVE_LOCK_MS = 900;
 const TOOLTIP_DELAY_MS = 150;
-const PENDING_NAVIGATION_TIMEOUT_MS = 8000;
-const PENDING_NAVIGATION_HOP_MS = 200;
-const LONG_JUMP_VIEWPORTS = 3;
 const COMPACT_VIEW_SETTING = 'compactView';
-/** Compact ticks keep this pitch until the conversation outgrows the track. */
-const COMPACT_TICK_PITCH_PX = 10;
-/** Room kept at both track ends so the outermost ticks are never clipped. */
-const COMPACT_TRACK_PADDING_PX = 16;
-/** Cluster height used before the track has a layout (first paint, tests). */
-const COMPACT_FALLBACK_SPAN_PX = 240;
-
-export function buildConversationId(
-  config: Pick<TurnNavigatorConfig, 'siteId' | 'conversationIdPattern'>,
-  input: string = location.href,
-): string {
-  try {
-    const url = new URL(input, location.origin);
-    if (config.conversationIdPattern) {
-      // The pattern policy (sites/safeRegex.ts) forbids the constructs that
-      // backtrack catastrophically; a bounded subject caps the rest.
-      const subject = url.pathname.slice(0, MAX_REGEX_INPUT_LENGTH);
-      const match = new RegExp(config.conversationIdPattern).exec(subject);
-      if (match?.[1]) return `${config.siteId}:conv:${match[1]}`;
-    }
-    return `${config.siteId}:${hashString(`${url.origin}${url.pathname}`)}`;
-  } catch {
-    return `${config.siteId}:${hashString(String(input || ''))}`;
-  }
-}
-
-export function buildTurnId(text: string): string {
-  return `c-${hashString(text)}`;
-}
-
-type Dot = HTMLButtonElement & {
-  dataset: DOMStringMap & { targetTurnId?: string; markerIndex?: string };
-};
-
-// Claude virtualizes long conversations: only a sliding window of turns is
-// mounted at any time, so the DOM is never the full conversation. Markers are
-// therefore ACCUMULATED across refreshes (ids keyed by content hash, not mount
-// index) and stitched into order via turns shared between overlapping windows.
-interface Marker {
-  id: string;
-  hash: string;
-  summary: string;
-  starred: boolean;
-  starredAt?: number;
-  /** Last-seen element; disconnected once Claude virtualizes the turn out. */
-  element: HTMLElement;
-  /** Last-known center offset within the scroll target; reused while unmounted. */
-  center: number;
-  dotElement: Dot | null;
-}
-
-export function buildClaudeConversationId(input = location.href): string {
-  try {
-    const url = new URL(input, location.origin);
-    const chatId = url.pathname.match(/^\/chat\/([^/?#]+)/)?.[1];
-    return chatId
-      ? `claude:conv:${chatId}`
-      : `claude:${hashString(`${url.origin}${url.pathname}`)}`;
-  } catch {
-    return `claude:${hashString(String(input || ''))}`;
-  }
-}
-
-export function buildClaudeTurnId(text: string): string {
-  return `c-${hashString(text)}`;
-}
-
-/**
- * Content hash shared by every historical turn-id format:
- * legacy `c-<mountIndex>-<hash>`, current `c-<hash>` and `c-<hash>~<n>`.
- */
-export function extractClaudeTurnHash(turnId: string): string {
-  const base = turnId.split('~')[0];
-  const segments = base.split('-');
-  return segments[segments.length - 1] || base;
-}
-
-/** Claude renders artifacts in a sandboxed claudeusercontent.com iframe. */
-export function hasOpenClaudeArtifact(doc: Document = document): boolean {
-  return !!doc.querySelector('iframe[src*="claudeusercontent.com"]');
-}
 
 export class TurnNavigator {
   private bar: HTMLElement | null = null;
@@ -175,26 +88,89 @@ export class TurnNavigator {
   private activeTurnId: string | null = null;
   private timelineStyle: TimelineStyle = 'dots';
   private navigationActiveLockUntil = 0;
-  private pendingNavigationId: string | null = null;
-  private pendingNavigationUntil = 0;
-  private stopPendingNavigationTimer: Dispose | null = null;
-  private stopUserScrollListeners: Dispose[] = [];
-  private pendingNavigationLo = 0;
-  private pendingNavigationHi = 0;
-  private pendingNavigationProbed = false;
   private lastHandledHash: string | null = null;
   private scrollTarget: HTMLElement | Window | null = null;
   /** Resolved with the target: `column-reverse` containers need offset translation. */
   private scrollTargetReversed = false;
   private stopScrollListener: Dispose | null = null;
 
-  private readonly barSelector: string;
+  private readonly session = new ConversationSession();
+  private readonly legacyNavigation: LegacyNavigationController;
+  private readonly chatgptProvider: ChatGptTimelineProvider | null;
+  private readonly chatgptRegistry: ChatGptTimelineRegistry | null;
+  private readonly chatgptNavigation: ChatGptNavigationController | null;
+  private readonly feedback: NavigationFeedback;
+  private readonly ownerId = crypto.randomUUID();
+  private starMessages: StarredMessage[] = [];
+  private temporaryStars: StarredMessage[] = [];
+  private promotionStars: StarredMessage[] = [];
+  private loadedStarSession = '';
+  private layoutRoot: HTMLElement | null = null;
+  private layoutObserver: TimelineLayoutObserver | null = null;
+  private stopLayout: Dispose | null = null;
+  private stopLayoutFrame: Dispose | null = null;
 
   constructor(
     private readonly scope: PluginScope,
     private readonly config: TurnNavigatorConfig,
+    provider?: ChatGptTimelineProvider,
   ) {
-    this.barSelector = `.gemini-timeline-bar[data-gv-turn-navigator="${config.siteId}"]`;
+    this.feedback = new NavigationFeedback(scope);
+    this.chatgptProvider =
+      config.siteId === 'chatgpt' ? (provider ?? new ChatGptTimelineProvider()) : null;
+    this.chatgptRegistry = this.chatgptProvider ? new ChatGptTimelineRegistry() : null;
+    this.legacyNavigation = new LegacyNavigationController(scope, {
+      findMarker: (id) => this.findMarker(id),
+      markers: () => this.markers,
+      computeCenter: (element) => this.computeElementCenter(element),
+      viewportHeight: () => this.getViewportHeight(),
+      scrollTop: () => this.getScrollTop(),
+      scrollHeight: () => this.getScrollHeight(),
+      scrollTarget: (element) => this.getScrollTarget(element),
+      currentTarget: () => this.scrollTarget,
+      inViewport: (element) => this.isElementInViewport(element),
+      lockActive: () => {
+        this.navigationActiveLockUntil = Date.now() + NAVIGATION_ACTIVE_LOCK_MS;
+      },
+      setActive: (id) => this.setActiveTurn(id),
+    });
+    this.chatgptNavigation = this.chatgptProvider
+      ? new ChatGptNavigationController(scope, {
+          isCurrent: (token) =>
+            !this.disposed && !this.syncConversation() && this.session.isCurrent(token),
+          resolve: (id) => {
+            const snapshot = this.chatgptProvider!.snapshot(this.session.token);
+            this.chatgptRegistry!.reconcile(snapshot);
+            const marker = this.chatgptRegistry!.findMarker(id);
+            return snapshot.root && marker
+              ? {
+                  element: marker.element,
+                  mounted: !!marker.mountedElement?.isConnected,
+                  root: snapshot.root,
+                }
+              : null;
+          },
+          scrollTarget: (element) => {
+            const target = this.getScrollTarget(element);
+            this.setScrollTarget(target);
+            return target;
+          },
+          state: (state, id) => {
+            const token = this.session.token;
+            this.feedback.show(state, () => {
+              if (!this.syncConversation() && this.session.isCurrent(token)) this.navigateTo(id);
+            });
+            this.navigationActiveLockUntil = state === 'pending' ? Number.POSITIVE_INFINITY : 0;
+            this.markers.forEach((marker) => marker.dotElement?.removeAttribute('aria-busy'));
+            if (state === 'pending' || state === 'success') this.setActiveTurn(id);
+            if (state === 'pending')
+              this.findMarker(id)?.dotElement?.setAttribute('aria-busy', 'true');
+            else this.updateActiveFromScroll();
+            if (state === 'success') trace.landed(id, 'anchor', this.getScrollTop());
+            if (state === 'unavailable') trace.homingTimedOut(id);
+          },
+        })
+      : null;
   }
 
   /** `<siteId>:conv:<id>` from the site's route pattern, else a hash of the path. */
@@ -219,14 +195,25 @@ export class TurnNavigator {
 
   async start(settings: PluginSettings = {}): Promise<void> {
     this.updateSettings(settings);
+    if (this.chatgptProvider) observeNewConversationSubmission(this.scope, this.chatgptProvider);
     // Markers stamp `data-gv-turn-id` onto the site's own turn nodes; roll
     // every stamp back when the plugin unmounts.
     this.scope.effect(
-      () => () =>
-        document
-          .querySelectorAll(`[${TURN_ID_ATTR}]`)
-          .forEach((element) => element.removeAttribute(TURN_ID_ATTR)),
+      () => () => {
+        document.querySelectorAll<HTMLElement>('[data-gv-turn-owner]').forEach((element) => {
+          if (element.dataset.gvTurnOwner !== this.ownerId) return;
+          element.removeAttribute(TURN_ID_ATTR);
+          element.removeAttribute('data-gv-turn-owner');
+        });
+      },
       'turn-id-attrs',
+    );
+    this.scope.effect(
+      () =>
+        watchRouteChanges(() => {
+          if (this.syncConversation()) this.scheduleRefresh();
+        }),
+      'timeline-route',
     );
     await initI18n().catch(() => {});
     if (this.disposed) return;
@@ -270,17 +257,42 @@ export class TurnNavigator {
   private observe(): void {
     if (!document.body || this.observing) return;
     this.observing = true;
-    this.scope.observe(document.body, { childList: true, subtree: true }, (records) => {
-      if (!records.some((record) => this.shouldRefreshForMutation(record))) return;
-      this.scheduleRefresh();
-    });
+    this.scope.observe(
+      document.body,
+      {
+        childList: true,
+        subtree: true,
+        characterData: !!this.chatgptProvider,
+        ...(this.chatgptProvider
+          ? {
+              attributes: true,
+              attributeFilter: [
+                'data-turn-key',
+                'data-turn-id-container',
+                'data-turn',
+                'data-message-author-role',
+                'hidden',
+                'aria-hidden',
+                'inert',
+              ],
+            }
+          : {}),
+      },
+      (records) => {
+        if (!records.some((record) => this.shouldRefreshForMutation(record))) return;
+        this.scheduleRefresh();
+      },
+    );
 
     if (chrome.storage?.onChanged) {
       this.scope.onChromeEvent(
         chrome.storage.onChanged,
         (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
           if (areaName !== 'local' || !changes[StorageKeys.TIMELINE_STARRED_MESSAGES]) return;
-          void this.loadStars(true).then(() => this.applyStarredState());
+          this.syncConversation();
+          void this.loadStars(true).then(() => {
+            if (!this.disposed) this.applyStarredState();
+          });
         },
       );
     }
@@ -300,13 +312,18 @@ export class TurnNavigator {
             ? node.parentElement
             : null;
       return !!element?.closest(
-        '[data-gv-turn-navigator], .timeline-preview-panel, .timeline-preview-toggle',
+        '[data-gv-turn-navigator], .timeline-preview-panel, .timeline-preview-toggle, .gv-timeline-navigation-status',
       );
     });
   }
 
   private shouldRefreshForMutation(record: MutationRecord): boolean {
     if (this.isOwnMutation(record)) return false;
+    if (this.chatgptProvider)
+      return (
+        record.type !== 'characterData' ||
+        !!this.toElement(record.target)?.closest(this.config.turnSelector)
+      );
     return (
       !!this.toElement(record.target)?.closest(this.config.turnSelector) ||
       [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some((node) =>
@@ -332,7 +349,7 @@ export class TurnNavigator {
   }
 
   private ensureUi(): void {
-    let bar = document.querySelector(this.barSelector) as HTMLElement | null;
+    let bar = this.bar?.isConnected ? this.bar : null;
     if (!bar) {
       bar = document.createElement('div');
       bar.className = 'gemini-timeline-bar';
@@ -364,7 +381,12 @@ export class TurnNavigator {
       this.tooltip = tooltip;
     }
     if (!this.previewPanel) {
-      this.previewPanel = new TimelinePreviewPanel(bar);
+      this.previewPanel = new TimelinePreviewPanel(bar, {
+        virtualizeLongLists: !!this.chatgptProvider,
+        historyNotice: this.chatgptProvider
+          ? getTranslationSync('timelineHistoryLoadedOnly')
+          : undefined,
+      });
       this.previewPanel.init(
         (turnId) => this.navigateTo(turnId),
         undefined,
@@ -374,15 +396,18 @@ export class TurnNavigator {
       this.scope.child(this.previewPanel, 'preview-panel');
     }
     this.applyTimelineStyle();
+    this.setSurfaceVisible();
   }
 
   private applyTimelineStyle(): void {
     if (!this.bar) return;
     const compact = this.timelineStyle === 'compact';
     this.bar.classList.toggle('timeline-style-compact', compact);
+    if (this.chatgptProvider) this.bar.classList.toggle('timeline-no-container', compact);
     const track = this.trackContent?.parentElement;
     if (compact) {
-      track?.setAttribute('aria-hidden', 'true');
+      if (!this.chatgptProvider) track?.setAttribute('aria-hidden', 'true');
+      else track?.removeAttribute('aria-hidden');
       this.hideTooltip();
     } else {
       track?.removeAttribute('aria-hidden');
@@ -399,191 +424,193 @@ export class TurnNavigator {
     }, REFRESH_DELAY_MS);
   }
 
+  private syncConversation(): boolean {
+    const id = this.buildConversationId();
+    const previousStorageId = this.session.storageId;
+    if (!this.session.sync(id, location.href, !!this.chatgptProvider)) return false;
+    const promotion =
+      this.chatgptProvider && !previousStorageId && this.session.storageId
+        ? [...this.temporaryStars]
+        : [];
+    this.conversationId = id;
+    this.resetConversationState();
+    this.promotionStars = promotion;
+    return true;
+  }
+
+  private setSurfaceVisible(): void {
+    if (!this.chatgptProvider) return;
+    const visible = this.markers.length > 0;
+    if (this.bar) this.bar.hidden = !visible;
+    this.previewPanel?.setSurfaceVisible(visible);
+    if (!visible) this.hideTooltip();
+  }
+
   private async refresh(): Promise<void> {
     if (this.disposed) return;
+    const changed = this.syncConversation();
     this.ensureUi();
-    const conversationChanged = this.buildConversationId() !== this.conversationId;
-    if (conversationChanged) this.resetConversationState();
-    await this.loadStars();
-    if (this.disposed) return;
-    const previousIds = this.markers.map((marker) => marker.id);
-    const turns = Array.from(document.querySelectorAll<HTMLElement>(this.config.turnSelector));
-    if (turns[0]) this.setScrollTarget(this.getScrollTarget(turns[0]));
-    this.markers = this.mergeMountedTurns(turns);
+    const token = this.session.token;
+    const previous = new Map(this.markers.map((marker) => [marker.id, marker]));
+    let root: HTMLElement | null = null;
+    if (this.chatgptProvider && this.chatgptRegistry) {
+      const snapshot = this.chatgptProvider.snapshot(token);
+      root = snapshot.root;
+      if (
+        !this.session.storageId &&
+        snapshot.status === 'ready' &&
+        !snapshot.turns.length &&
+        this.markers.length
+      ) {
+        this.session.restart();
+        this.resetConversationState();
+        this.scheduleRefresh();
+        return;
+      }
+      this.markers = this.chatgptRegistry.reconcile(snapshot).map((entry) => {
+        const marker = previous.get(entry.id) ?? {
+          ...entry,
+          starred: false,
+          center: 0,
+          dotElement: null,
+        };
+        Object.assign(marker, entry);
+        return marker;
+      });
+      if (snapshot.status === 'pending' || (this.layoutRoot && this.layoutRoot !== root)) {
+        this.chatgptNavigation?.cancel();
+        this.feedback.clear();
+      }
+      if (snapshot.status === 'pending') this.previewPanel?.resetConversation();
+    } else {
+      const turns = Array.from(document.querySelectorAll<HTMLElement>(this.config.turnSelector));
+      this.markers = this.mergeMountedTurns(turns);
+    }
+    if (!this.session.isCurrent(token) || this.disposed) return;
+    if (this.markers[0]) this.setScrollTarget(this.getScrollTarget(this.markers[0].element));
+    for (const marker of this.markers) {
+      marker.element.dataset.gvTurnId = marker.id;
+      marker.element.dataset.gvTurnOwner = this.ownerId;
+    }
+    this.bindLayout(root);
     this.markerCenters = this.computeMarkerCenters();
-    const sameMarkers =
-      previousIds.length === this.markers.length &&
-      previousIds.every((id, index) => id === this.markers[index]?.id);
-    if (!sameMarkers || this.markers.some((marker) => !marker.dotElement)) this.renderDots();
+    this.renderDots();
     this.applyStarredState();
+    this.setSurfaceVisible();
     this.refreshActive();
     this.handleHash();
-    trace.turns(this.config, this.conversationId, conversationChanged, turns.length, this.markers);
+    void this.loadStars().then(() => {
+      if (!this.disposed && !this.syncConversation() && this.session.isCurrent(token))
+        this.applyStarredState();
+    });
+    if (this.promotionStars.length && this.session.storageId && this.markers.length) {
+      const promotion = this.promotionStars;
+      this.promotionStars = [];
+      this.starSnapshots.begin(() => false);
+      const conversationId = this.session.storageId;
+      for (const message of promotion) {
+        if (!this.markers.some((marker) => marker.persistent && marker.id === message.turnId))
+          continue;
+        const saved = { ...message, conversationId, conversationUrl: location.href.split('#')[0] };
+        this.starMessages.push(saved);
+        void StarredMessagesService.addStarredMessage(saved).then(() => {
+          if (this.session.isCurrent(token) && !this.disposed) {
+            void this.loadStars(true).then(() => this.applyStarredState());
+          }
+        });
+      }
+      this.applyStarredState();
+    }
+    trace.turns(
+      this.config,
+      this.conversationId,
+      changed,
+      this.markers.filter((marker) => marker.element.isConnected).length,
+      this.markers,
+    );
+  }
+
+  private bindLayout(root: HTMLElement | null): void {
+    if (!this.chatgptProvider) return;
+    if (root === this.layoutRoot) {
+      this.layoutObserver?.update(this.markers);
+      return;
+    }
+    void this.stopLayout?.();
+    this.stopLayout = null;
+    this.layoutRoot = root;
+    if (!root || typeof ResizeObserver === 'undefined') return;
+    const token = this.session.token;
+    const update = (): void => {
+      if (this.stopLayoutFrame || this.disposed) return;
+      this.stopLayoutFrame = this.scope.frame(() => {
+        this.stopLayoutFrame = null;
+        if (this.syncConversation() || !this.session.isCurrent(token)) return;
+        if (this.markers[0]) this.setScrollTarget(this.getScrollTarget(this.markers[0].element));
+        this.markerCenters = this.computeMarkerCenters();
+        this.applyCompactOffsets();
+        this.updateActiveFromScroll();
+        this.previewPanel?.reposition();
+      });
+    };
+    this.layoutObserver = new TimelineLayoutObserver(this.scope, root, update);
+    this.stopLayout = this.layoutObserver.stop;
+    this.layoutObserver.update(this.markers);
   }
 
   private resetConversationState(): void {
+    this.starSnapshots.begin(() => false);
+    this.loadedStarSession = '';
+    this.clearPendingNavigation();
+    this.cancelLongPress();
+    this.hideTooltip();
+    void this.stopRefreshTimer?.();
+    this.stopRefreshTimer = null;
+    void this.stopLayout?.();
+    this.stopLayout = null;
+    void this.stopLayoutFrame?.();
+    this.stopLayoutFrame = null;
+    this.layoutRoot = null;
+    this.layoutObserver = null;
+    this.setScrollTarget(null);
+    this.chatgptRegistry?.reset();
+    this.starMessages = [];
+    this.temporaryStars = [];
+    this.promotionStars = [];
+    this.starredByHash.clear();
     this.markers = [];
     this.markerCenters = [];
     this.activeTurnId = null;
-    this.clearPendingNavigation();
+    this.navigationActiveLockUntil = 0;
+    this.suppressClickUntil = 0;
     this.lastHandledHash = null;
+    this.feedback.clear();
+    this.previewPanel?.resetConversation();
     if (this.trackContent) this.trackContent.textContent = '';
+    this.setSurfaceVisible();
   }
 
-  /**
-   * Stitch the currently mounted turns into the accumulated marker list.
-   * Mounted turns are anchored to known markers by content hash (order
-   * preserving) and new turns are woven in next to their anchors. Known turns
-   * are NEVER dropped: Claude's virtualization can mount sparse,
-   * non-contiguous windows mid-transition (old and new window briefly
-   * coexisting), so a missing turn only means "not mounted right now", not
-   * "deleted" — mirroring the Gemini timeline's grow-only behaviour.
-   */
   private mergeMountedTurns(turns: HTMLElement[]): Marker[] {
-    const known = this.markers;
-    const mounted = turns.map((element) => {
-      const summary = this.extractText(element);
-      return { element, summary, hash: hashString(summary) };
-    });
-    if (!mounted.length) return known;
-
-    const matchedKnownIndex = new Array<number>(mounted.length).fill(-1);
-    let searchFrom = 0;
-    for (let i = 0; i < mounted.length; i++) {
-      for (let j = searchFrom; j < known.length; j++) {
-        if (known[j].hash === mounted[i].hash) {
-          matchedKnownIndex[i] = j;
-          searchFrom = j + 1;
-          break;
-        }
-      }
-    }
-
-    const usedIds = new Set(known.map((marker) => marker.id));
-    const createMarker = (entry: (typeof mounted)[number]): Marker => {
-      const id = this.claimTurnId(entry.hash, usedIds);
-      entry.element.dataset.gvTurnId = id;
-      return {
-        id,
-        hash: entry.hash,
-        summary: entry.summary,
-        starred: false,
-        element: entry.element,
-        center: this.computeElementCenter(entry.element),
-        dotElement: null,
-      };
-    };
-
-    const firstMatch = matchedKnownIndex.findIndex((index) => index >= 0);
-    if (firstMatch === -1) {
-      // Jumped into an unexplored region: place the whole block by its
-      // vertical position relative to the accumulated turns.
-      const fresh = mounted.map(createMarker);
-      const insertAt = known.findIndex((marker) => marker.center > fresh[0].center);
-      return insertAt === -1
-        ? [...known, ...fresh]
-        : [...known.slice(0, insertAt), ...fresh, ...known.slice(insertAt)];
-    }
-
-    const beforeFirstAnchor: Marker[] = [];
-    const afterKnownIndex = new Map<number, Marker[]>();
-    // Fresh centre minus remembered centre per anchor: how far Claude's
-    // re-measuring has shifted this region since the neighbours were seen.
-    const anchorDrift = new Map<number, number>();
-    let lastAnchor = -1;
-    for (let i = 0; i < mounted.length; i++) {
-      const knownIndex = matchedKnownIndex[i];
-      if (knownIndex >= 0) {
-        const survivor = known[knownIndex];
-        anchorDrift.set(
-          knownIndex,
-          this.computeElementCenter(mounted[i].element) - survivor.center,
-        );
-        survivor.element = mounted[i].element;
-        survivor.summary = mounted[i].summary;
-        mounted[i].element.dataset.gvTurnId = survivor.id;
-        lastAnchor = knownIndex;
-        continue;
-      }
-      const marker = createMarker(mounted[i]);
-      if (lastAnchor === -1) {
-        beforeFirstAnchor.push(marker);
-      } else {
-        const bucket = afterKnownIndex.get(lastAnchor);
-        if (bucket) bucket.push(marker);
-        else afterKnownIndex.set(lastAnchor, [marker]);
-      }
-    }
-
-    // Anchors fix the order of the turns they match; a block of new turns is
-    // then filed by scroll position among the known turns between its two
-    // bounding anchors. "Right next to the anchor" is not enough: Claude keeps
-    // the latest turn mounted while the reader sits at the top, and that lone
-    // tail anchor would drag the conversation's opening turns behind the
-    // bottom window. Known centres are compared after the nearest anchor's
-    // drift so re-measured content does not skew the comparison.
-    const anchors = matchedKnownIndex.filter((index) => index >= 0);
-    const insertBefore = new Map<number, Marker[]>();
-    // A known turn between two anchors is assumed to have drifted like the
-    // anchor nearer to it; anchors on different sides of a re-measured region
-    // can carry very different drifts.
-    const driftAt = (index: number, prev: number | undefined, next: number | undefined): number => {
-      const prevDrift = prev === undefined ? undefined : anchorDrift.get(prev);
-      const nextDrift = next === undefined ? undefined : anchorDrift.get(next);
-      if (prevDrift === undefined) return nextDrift ?? 0;
-      if (nextDrift === undefined) return prevDrift;
-      return index - prev! <= next! - index ? prevDrift : nextDrift;
-    };
-    const file = (block: Marker[], prev: number | undefined, next: number | undefined): void => {
-      if (!block.length) return;
-      const lo = prev === undefined ? 0 : prev + 1;
-      const hi = next ?? known.length;
-      let at = hi;
-      for (let index = lo; index < hi; index++) {
-        if (known[index].center + driftAt(index, prev, next) > block[0].center) {
-          at = index;
-          break;
-        }
-      }
-      const bucket = insertBefore.get(at);
-      if (bucket) bucket.push(...block);
-      else insertBefore.set(at, block);
-    };
-    file(beforeFirstAnchor, undefined, anchors[0]);
-    anchors.forEach((anchor, rank) => {
-      const block = afterKnownIndex.get(anchor);
-      if (block) file(block, anchor, anchors[rank + 1]);
-    });
-
-    const result: Marker[] = [];
-    known.forEach((marker, index) => {
-      const block = insertBefore.get(index);
-      if (block) result.push(...block);
-      result.push(marker);
-    });
-    const tail = insertBefore.get(known.length);
-    if (tail) result.push(...tail);
-    return result;
-  }
-
-  private claimTurnId(hash: string, usedIds: Set<string>): string {
-    const base = `c-${hash}`;
-    let id = base;
-    for (let n = 2; usedIds.has(id); n++) id = `${base}~${n}`;
-    usedIds.add(id);
-    return id;
+    return mergeLegacyTurns(
+      this.markers,
+      turns,
+      (element) => this.extractText(element),
+      (element) => this.computeElementCenter(element),
+    );
   }
 
   private async loadStars(force = false): Promise<void> {
-    const nextConversationId = this.buildConversationId();
-    if (!force && nextConversationId === this.conversationId) return;
-    this.conversationId = nextConversationId;
+    const id = this.session.storageId;
+    const token = this.session.token;
+    if (!id || (!force && this.loadedStarSession === token)) return;
+    this.loadedStarSession = token;
     const isCurrent = this.starSnapshots.begin(
-      () => !this.disposed && this.buildConversationId() === nextConversationId,
+      () => !this.disposed && this.session.isCurrent(token) && this.buildConversationId() === id,
     );
-    const messages =
-      await StarredMessagesService.getStarredMessagesForConversation(nextConversationId);
-    if (isCurrent())
+    const messages = await StarredMessagesService.getStarredMessagesForConversation(id);
+    if (!isCurrent()) return;
+    this.starMessages = messages;
+    if (!this.chatgptRegistry)
       this.starredByHash = new Map(
         messages.map((message) => [
           extractTurnHash(message.turnId),
@@ -594,75 +621,27 @@ export class TurnNavigator {
 
   private renderDots(): void {
     if (!this.trackContent) return;
-    this.trackContent.textContent = '';
-    const last = Math.max(1, this.markers.length - 1);
-    const compactOffsets = this.buildCompactMarkerOffsets();
-    this.markers.forEach((marker, index) => {
-      const dot = document.createElement('button') as Dot;
-      dot.className = 'timeline-dot';
-      dot.type = 'button';
-      dot.dataset.targetTurnId = marker.id;
-      dot.dataset.markerIndex = String(index);
-      if (this.timelineStyle === 'compact') {
-        dot.style.setProperty('--timeline-compact-offset', `${compactOffsets[index] ?? 0}px`);
-      } else {
-        dot.style.setProperty('--n', String(this.markers.length === 1 ? 0.5 : index / last));
-      }
-      dot.setAttribute('aria-label', marker.summary || `Message ${index + 1}`);
-      dot.setAttribute('aria-pressed', marker.starred ? 'true' : 'false');
-      dot.setAttribute('aria-current', marker.id === this.activeTurnId ? 'true' : 'false');
-      dot.classList.toggle('starred', marker.starred);
-      dot.classList.toggle('active', marker.id === this.activeTurnId);
-      dot.addEventListener('click', (event) => {
-        // The compact rail is itself the preview-panel toggle: a tick click
-        // must jump, not toggle the panel it bubbles up to.
-        event.stopPropagation();
-        if (Date.now() < this.suppressClickUntil) {
-          event.preventDefault();
-          return;
-        }
-        this.navigateTo(marker.id);
-      });
-      dot.addEventListener('pointerdown', () => this.startLongPress(dot));
-      dot.addEventListener('pointerup', () => this.cancelLongPress());
-      dot.addEventListener('pointercancel', () => this.cancelLongPress());
-      dot.addEventListener('pointerenter', () => this.scheduleTooltip(dot));
-      dot.addEventListener('pointerleave', () => {
-        this.cancelLongPress();
-        this.hideTooltip();
-      });
-      dot.addEventListener('focus', () => this.showTooltip(dot));
-      dot.addEventListener('blur', () => this.hideTooltip());
-      marker.dotElement = dot;
-      this.trackContent!.appendChild(dot);
+    renderTimelineDots(this.trackContent, this.markers, this.timelineStyle, {
+      activeId: () => this.activeTurnId,
+      suppressed: () => Date.now() < this.suppressClickUntil,
+      navigate: (id) => this.navigateTo(id),
+      longPress: (dot) => this.startLongPress(dot),
+      cancelLongPress: () => this.cancelLongPress(),
+      scheduleTooltip: (dot) => this.scheduleTooltip(dot),
+      showTooltip: (dot) => this.showTooltip(dot),
+      hideTooltip: () => this.hideTooltip(),
     });
   }
 
-  /**
-   * Compact ticks keep a fixed pitch and spread over the whole track; the
-   * pitch only shrinks once a conversation outgrows the track. A fixed-height
-   * cluster turned every long conversation into an unreadable barcode.
-   */
-  private buildCompactMarkerOffsets(): number[] {
-    const count = this.markers.length;
-    if (count === 0) return [];
-    const trackHeight = this.trackContent?.parentElement?.clientHeight ?? 0;
-    const span =
-      trackHeight > 0
-        ? Math.max(0, trackHeight - COMPACT_TRACK_PADDING_PX * 2)
-        : COMPACT_FALLBACK_SPAN_PX;
-    const gap = count > 1 ? Math.min(COMPACT_TICK_PITCH_PX, span / (count - 1)) : 0;
-    const center = (count - 1) / 2;
-    return this.markers.map((_, index) => (index - center) * gap);
-  }
-
-  /** Re-space the existing compact ticks after the track changes height. */
   private applyCompactOffsets(): void {
     if (this.timelineStyle !== 'compact') return;
-    const offsets = this.buildCompactMarkerOffsets();
-    this.markers.forEach((marker, index) => {
-      marker.dotElement?.style.setProperty('--timeline-compact-offset', `${offsets[index] ?? 0}px`);
-    });
+    const offsets = compactMarkerOffsets(
+      this.markers.length,
+      this.trackContent?.parentElement?.clientHeight ?? 0,
+    );
+    this.markers.forEach((marker, index) =>
+      marker.dotElement?.style.setProperty('--timeline-compact-offset', `${offsets[index] ?? 0}px`),
+    );
   }
 
   private startLongPress(dot: Dot): void {
@@ -670,7 +649,9 @@ export class TurnNavigator {
     if (this.disposed) return;
     this.longPressDot = dot;
     dot.classList.add('holding');
+    const token = this.session.token;
     this.stopLongPressTimer = this.scope.timer(() => {
+      if (this.syncConversation() || !this.session.isCurrent(token) || !dot.isConnected) return;
       this.stopLongPressTimer = null;
       this.suppressClickUntil = Date.now() + 350;
       const id = dot.dataset.targetTurnId;
@@ -687,32 +668,74 @@ export class TurnNavigator {
   }
 
   private async toggleStar(turnId: string): Promise<void> {
-    const marker = this.markers.find((item) => item.id === turnId);
+    if (this.syncConversation()) return;
+    const token = this.session.token;
+    const marker = this.findMarker(turnId);
     if (!marker) return;
-    const existing = this.starredByHash.get(marker.hash);
-    if (existing) {
-      this.starredByHash.delete(marker.hash);
-      // Remove by the stored id, which may still be in the legacy format.
-      await StarredMessagesService.removeStarredMessage(this.conversationId, existing.turnId);
+    const id = this.session.storageId;
+    if (this.chatgptRegistry) {
+      // A read begun before this local change must not restore the previous value.
+      this.starSnapshots.begin(() => false);
+      const persisted = !!id && !!marker.persistent;
+      const records = persisted ? this.starMessages : this.temporaryStars;
+      const existing = this.chatgptRegistry.resolveStars(records).get(marker.id);
+      if (existing) {
+        if (persisted)
+          this.starMessages = records.filter((message) => message.turnId !== existing.storedTurnId);
+        else
+          this.temporaryStars = records.filter(
+            (message) => message.turnId !== existing.storedTurnId,
+          );
+        this.applyStarredState();
+        if (persisted)
+          await StarredMessagesService.removeStarredMessage(id!, existing.storedTurnId);
+      } else {
+        const message: StarredMessage = {
+          turnId: marker.id,
+          content: marker.summary,
+          conversationId: id ?? this.session.token,
+          conversationUrl: location.href.split('#')[0],
+          conversationTitle: this.getTitle(),
+          starredAt: Date.now(),
+        };
+        if (id && marker.persistent) {
+          this.starMessages.push(message);
+          this.applyStarredState();
+          await StarredMessagesService.addStarredMessage(message);
+        } else {
+          this.temporaryStars.push(message);
+          this.applyStarredState();
+        }
+      }
     } else {
-      const starredAt = Date.now();
-      this.starredByHash.set(marker.hash, { turnId: marker.id, starredAt });
-      const message: StarredMessage = {
-        turnId: marker.id,
-        content: marker.summary,
-        conversationId: this.conversationId,
-        conversationUrl: location.href.split('#')[0],
-        conversationTitle: this.getTitle(),
-        starredAt,
-      };
-      await StarredMessagesService.addStarredMessage(message);
+      const existing = this.starredByHash.get(marker.hash);
+      if (existing) {
+        this.starredByHash.delete(marker.hash);
+        await StarredMessagesService.removeStarredMessage(this.conversationId, existing.turnId);
+      } else {
+        const starredAt = Date.now();
+        this.starredByHash.set(marker.hash, { turnId: marker.id, starredAt });
+        await StarredMessagesService.addStarredMessage({
+          turnId: marker.id,
+          content: marker.summary,
+          conversationId: this.conversationId,
+          conversationUrl: location.href.split('#')[0],
+          conversationTitle: this.getTitle(),
+          starredAt,
+        });
+      }
     }
-    this.applyStarredState();
+    if (!this.disposed && !this.syncConversation() && this.session.isCurrent(token))
+      this.applyStarredState();
   }
 
   private applyStarredState(): void {
+    const resolved = this.chatgptRegistry?.resolveStars([
+      ...this.starMessages,
+      ...this.temporaryStars,
+    ]);
     this.markers.forEach((marker) => {
-      const entry = this.starredByHash.get(marker.hash);
+      const entry = resolved ? resolved.get(marker.id) : this.starredByHash.get(marker.hash);
       marker.starred = !!entry;
       marker.starredAt = entry?.starredAt;
       marker.dotElement?.classList.toggle('starred', marker.starred);
@@ -764,28 +787,7 @@ export class TurnNavigator {
     const marker = this.markers.find((item) => item.id === dot.dataset.targetTurnId);
     if (!marker?.summary) return;
 
-    this.getTooltipTextElement().textContent = `${marker.starred ? '★ ' : ''}${marker.summary}`;
-    this.tooltip.setAttribute('dir', 'auto');
-    this.tooltip.setAttribute('aria-hidden', 'false');
-    this.tooltip.style.width = 'min(288px, calc(100vw - 32px))';
-
-    const rect = dot.getBoundingClientRect();
-    const gap = 18;
-    const tooltipWidth = this.tooltip.offsetWidth || 288;
-    const tooltipHeight = this.tooltip.offsetHeight || 78;
-    const leftPlacement = rect.left > window.innerWidth / 2;
-    const left = leftPlacement ? rect.left - gap - tooltipWidth : rect.right + gap;
-    const top = Math.max(
-      8,
-      Math.min(
-        window.innerHeight - tooltipHeight - 8,
-        rect.top + rect.height / 2 - tooltipHeight / 2,
-      ),
-    );
-    this.tooltip.style.left = `${Math.max(8, Math.round(left))}px`;
-    this.tooltip.style.top = `${Math.round(top)}px`;
-    this.tooltip.setAttribute('data-placement', leftPlacement ? 'left' : 'right');
-    this.tooltip.classList.add('visible');
+    showTurnTooltip(this.tooltip, dot, marker.summary, marker.starred);
   }
 
   private hideTooltip(): void {
@@ -795,11 +797,11 @@ export class TurnNavigator {
     this.tooltip?.setAttribute('aria-hidden', 'true');
   }
 
-  private getTooltipTextElement(): HTMLElement {
-    return (this.tooltip?.firstElementChild as HTMLElement | null) ?? this.tooltip!;
-  }
-
   private refreshActive(): void {
+    if (this.chatgptProvider) {
+      this.updateActiveFromScroll();
+      return;
+    }
     if (this.activeTurnId && this.markers.some((marker) => marker.id === this.activeTurnId)) {
       this.updateDotActive(this.activeTurnId, true);
       return;
@@ -817,24 +819,19 @@ export class TurnNavigator {
       this.setActiveTurn(this.markers[this.markers.length - 1]?.id ?? null);
       return;
     }
-    const ref = this.getScrollTop() + this.getViewportHeight() * ACTIVE_ANCHOR;
-    let low = 0;
-    let high = this.markerCenters.length;
-    while (low < high) {
-      const mid = (low + high) >> 1;
-      if (this.markerCenters[mid] <= ref) low = mid + 1;
-      else high = mid;
-    }
-    const previous = Math.max(0, low - 1);
-    const next = Math.min(this.markerCenters.length - 1, low);
-    const index =
-      Math.abs(this.markerCenters[next] - ref) < Math.abs(this.markerCenters[previous] - ref)
-        ? next
-        : previous;
-    this.setActiveTurn(this.markers[index]?.id ?? null);
+    const anchor = this.getViewportHeight() * ACTIVE_ANCHOR;
+    this.setActiveTurn(
+      readingMarkerId(
+        this.markers,
+        this.markerCenters,
+        this.getScrollTop() + anchor,
+        this.chatgptProvider ? this.getViewportTop() + anchor : undefined,
+      ),
+    );
   };
 
   private setScrollTarget(target: HTMLElement | Window | null): void {
+    this.scrollTargetReversed = isReverseScroller(target);
     if (this.scrollTarget === target) return;
     void this.stopScrollListener?.();
     this.stopScrollListener = null;
@@ -849,6 +846,10 @@ export class TurnNavigator {
   }
 
   private findMarker(turnId: string): Marker | undefined {
+    if (this.chatgptRegistry) {
+      const entry = this.chatgptRegistry.findMarker(turnId);
+      return entry ? this.markers.find((marker) => marker.id === entry.id) : undefined;
+    }
     return (
       this.markers.find((item) => item.id === turnId) ??
       this.markers.find((item) => item.hash === extractTurnHash(turnId))
@@ -856,189 +857,17 @@ export class TurnNavigator {
   }
 
   private navigateTo(turnId: string): void {
-    const marker = this.findMarker(turnId);
-    if (!marker) return trace.ignored(turnId);
-    this.navigationActiveLockUntil = Date.now() + NAVIGATION_ACTIVE_LOCK_MS;
-    this.setActiveTurn(marker.id);
-    trace.requested(marker, this.markers.indexOf(marker));
-    if (marker.element.isConnected) {
-      const center = this.computeElementCenter(marker.element);
-      const anchorOffset = this.getViewportHeight() * ACTIVE_ANCHOR;
-      const distance = Math.abs(center - (this.getScrollTop() + anchorOffset));
-      if (distance <= this.getViewportHeight() * LONG_JUMP_VIEWPORTS) {
-        this.clearPendingNavigation();
-        scrollElementToAnchor(
-          this.getScrollTarget(marker.element),
-          marker.element,
-          this.getScrollTop(),
-          this.getViewportHeight(),
-        );
-        trace.landed(marker.id, 'anchor', this.getScrollTop(), distance);
-        return;
-      }
-      // Long jump to a mounted turn: Claude re-measures once the landing region
-      // mounts, so the homing loop still fine-aims — after the scroll settles,
-      // never into one still travelling. See scrollMotion.ts.
-      this.beginPendingNavigation(marker);
-      this.pendingNavigationProbed = true;
-      const hop = (): void => this.schedulePendingNavigationHop();
-      const behavior = navigationScrollBehavior();
-      trace.longJump(marker.id, distance, behavior);
-      scrollToCenter(this.scrollTarget, center, this.getViewportHeight(), behavior);
-      if (behavior !== 'smooth') hop();
-      else {
-        const timer = (run: () => void, ms: number): void => void this.scope.timer(run, ms);
-        afterScrollSettles(
-          () => this.getScrollTop(),
-          timer,
-          () => this.disposed,
-          hop,
-        );
-      }
-      return;
-    }
-    // Virtualized out: the remembered offset is only an estimate (Claude
-    // re-measures content as it mounts), so home in iteratively instead of
-    // trusting a single jump.
-    trace.homing(marker.id);
-    this.beginPendingNavigation(marker);
-    this.homePendingNavigation();
-  }
-
-  private beginPendingNavigation(marker: Marker): void {
-    this.clearPendingNavigation();
-    this.pendingNavigationId = marker.id;
-    this.pendingNavigationUntil = Date.now() + PENDING_NAVIGATION_TIMEOUT_MS;
-    this.pendingNavigationLo = 0;
-    this.pendingNavigationHi = Math.max(
-      this.getScrollHeight(),
-      marker.center + this.getViewportHeight(),
-    );
-    this.pendingNavigationProbed = false;
-    if (this.disposed) return;
-    this.stopUserScrollListeners = [
-      this.scope.on(window, 'wheel', this.cancelPendingNavigationOnUserScroll, { passive: true }),
-      this.scope.on(window, 'touchmove', this.cancelPendingNavigationOnUserScroll, {
-        passive: true,
-      }),
-    ];
+    if (this.syncConversation()) return;
+    if (this.chatgptNavigation) {
+      const marker = this.findMarker(turnId);
+      if (!marker) return;
+      this.chatgptNavigation.start(marker.id, this.session.token);
+    } else this.legacyNavigation.navigateTo(turnId);
   }
 
   private clearPendingNavigation(): void {
-    this.pendingNavigationId = null;
-    void this.stopPendingNavigationTimer?.();
-    this.stopPendingNavigationTimer = null;
-    for (const stop of this.stopUserScrollListeners.splice(0)) void stop();
-  }
-
-  private cancelPendingNavigationOnUserScroll = (): void => {
-    this.clearPendingNavigation();
-  };
-
-  /**
-   * One homing step toward a virtualized-out turn: bisect on the target's
-   * position (bounds tightened from which side of the mounted window the turn
-   * sits on), jump instantly, and let Claude mount content at the landing
-   * point. Once the turn's element is back in the DOM, aim precisely.
-   */
-  private homePendingNavigation = (): void => {
-    this.stopPendingNavigationTimer = null;
-    if (!this.pendingNavigationId || this.disposed) return;
-    if (Date.now() > this.pendingNavigationUntil) {
-      trace.homingTimedOut(this.pendingNavigationId);
-      this.clearPendingNavigation();
-      return;
-    }
-    const marker = this.markers.find((item) => item.id === this.pendingNavigationId);
-    if (!marker) {
-      this.clearPendingNavigation();
-      return;
-    }
-    this.navigationActiveLockUntil = Date.now() + NAVIGATION_ACTIVE_LOCK_MS;
-    if (marker.element.isConnected) {
-      this.clearPendingNavigation();
-      scrollElementToAnchor(
-        this.getScrollTarget(marker.element),
-        marker.element,
-        this.getScrollTop(),
-        this.getViewportHeight(),
-      );
-      trace.landed(marker.id, 'homing', this.getScrollTop());
-      return;
-    }
-    const mountedIndexes = this.markers.reduce<number[]>((acc, item, index) => {
-      if (item.element.isConnected) acc.push(index);
-      return acc;
-    }, []);
-    if (mountedIndexes.length) {
-      // Direction info is only trustworthy once the mounted window has caught
-      // up with the last jump; otherwise wait a tick instead of moving.
-      const windowCurrent = mountedIndexes.some((index) =>
-        this.isElementInViewport(this.markers[index].element),
-      );
-      if (!windowCurrent) {
-        this.schedulePendingNavigationHop();
-        return;
-      }
-      const targetIndex = this.markers.indexOf(marker);
-      const firstMounted = mountedIndexes[0];
-      const lastMounted = mountedIndexes[mountedIndexes.length - 1];
-      if (targetIndex < firstMounted) {
-        this.pendingNavigationHi = Math.min(this.pendingNavigationHi, this.getScrollTop());
-      } else if (targetIndex > lastMounted) {
-        this.pendingNavigationLo = Math.max(
-          this.pendingNavigationLo,
-          this.getScrollTop() + this.getViewportHeight(),
-        );
-      } else {
-        // Inside a virtualization gap: bracket the target between its nearest
-        // mounted neighbours. (A truly deleted turn collapses the bracket and
-        // ends the search below.)
-        let beforeIndex = -1;
-        let afterIndex = -1;
-        for (const index of mountedIndexes) {
-          if (index < targetIndex) beforeIndex = index;
-          else if (index > targetIndex) {
-            afterIndex = index;
-            break;
-          }
-        }
-        if (beforeIndex >= 0) {
-          this.pendingNavigationLo = Math.max(
-            this.pendingNavigationLo,
-            this.computeElementCenter(this.markers[beforeIndex].element),
-          );
-        }
-        if (afterIndex >= 0) {
-          this.pendingNavigationHi = Math.min(
-            this.pendingNavigationHi,
-            this.computeElementCenter(this.markers[afterIndex].element),
-          );
-        }
-      }
-    }
-    if (this.pendingNavigationHi - this.pendingNavigationLo < 1) {
-      this.clearPendingNavigation();
-      return;
-    }
-    const staleCenterUsable =
-      !this.pendingNavigationProbed &&
-      marker.center > this.pendingNavigationLo &&
-      marker.center < this.pendingNavigationHi;
-    const probe = staleCenterUsable
-      ? marker.center
-      : (this.pendingNavigationLo + this.pendingNavigationHi) / 2;
-    this.pendingNavigationProbed = true;
-    scrollToCenter(this.scrollTarget, probe, this.getViewportHeight(), 'instant');
-    this.schedulePendingNavigationHop();
-  };
-
-  private schedulePendingNavigationHop(): void {
-    if (this.stopPendingNavigationTimer !== null || this.disposed) return;
-    this.stopPendingNavigationTimer = this.scope.timer(
-      this.homePendingNavigation,
-      PENDING_NAVIGATION_HOP_MS,
-    );
+    this.legacyNavigation.clearPendingNavigation();
+    this.chatgptNavigation?.cancel();
   }
 
   private isElementInViewport(element: HTMLElement): boolean {
@@ -1049,7 +878,12 @@ export class TurnNavigator {
   private handleHash = (): void => {
     const hash = location.hash;
     if (!hash.startsWith('#gv-turn-') || hash === this.lastHandledHash) return;
-    const turnId = decodeURIComponent(hash.slice('#gv-turn-'.length));
+    let turnId: string;
+    try {
+      turnId = decodeURIComponent(hash.slice('#gv-turn-'.length));
+    } catch {
+      return;
+    }
     if (!turnId) return;
     const marker = this.findMarker(turnId);
     // Not discovered yet (virtualized out and never mounted): leave the hash
@@ -1143,12 +977,6 @@ export class TurnNavigator {
   private isAtScrollBottom(): boolean {
     return geom.readingAtBottom(this.scrollTarget, this.scrollTargetReversed);
   }
-
-  /**
-   * Every jump is instant. Smooth scrolling drifts across a virtualized
-   * conversation as Claude re-measures content mid-flight, and mixing smooth
-   * short hops with instant long ones read as erratic navigation.
-   */
 }
 
 /**
@@ -1159,8 +987,9 @@ export function activateTurnNavigator(
   scope: PluginScope,
   config: TurnNavigatorConfig,
   settings: PluginSettings = {},
+  provider?: ChatGptTimelineProvider,
 ): PrimitiveHandle {
-  const navigator = new TurnNavigator(scope, config);
+  const navigator = new TurnNavigator(scope, config, provider);
   // Startup registers as a pending effect: dispose() barriers on it, and a
   // mid-startup unmount is handled by the scope instead of a destroyed flag.
   scope.effect(() => navigator.start(settings).then(() => () => {}), 'turn-navigator-start');

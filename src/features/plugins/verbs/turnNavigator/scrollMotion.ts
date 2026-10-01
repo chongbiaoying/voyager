@@ -124,6 +124,15 @@ function applyScroll(target: ScrollTarget, top: number, behavior: ScrollBehavior
   else container.scrollTop = clamped;
 }
 
+/** Move on the normalized reading axis, including ChatGPT's negative device offsets. */
+export function scrollToReadingOffset(
+  target: ScrollTarget,
+  top: number,
+  behavior: ScrollBehavior,
+): void {
+  applyScroll(target, top, behavior);
+}
+
 /** Put `center`, an offset in the target's own coordinates, on the anchor line. */
 export function scrollToCenter(
   target: ScrollTarget,

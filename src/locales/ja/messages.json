@@ -3117,5 +3117,21 @@
   "popupPinHintDismiss": {
     "message": "閉じる",
     "description": "Popup: dismiss the pin reminder"
+  },
+  "timelineNavigationPending": {
+    "message": "メッセージを探しています…",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationUnavailable": {
+    "message": "このメッセージを見つけられませんでした。再試行できます。",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationRetry": {
+    "message": "再試行",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineHistoryLoadedOnly": {
+    "message": "読み込まれたメッセージのみを索引します。",
+    "description": "ChatGPT timeline navigation feedback"
   }
 }

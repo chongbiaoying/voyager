@@ -672,4 +672,199 @@ describe('TimelinePreviewPanel', () => {
       }
     });
   });
+
+  describe('conversation reset and surface visibility', () => {
+    it('clears search, active state, pinning and pending interactions even when closed', () => {
+      vi.useFakeTimers();
+      try {
+        panel.destroy();
+        const onSearchChange = vi.fn();
+        const onToggleStar = vi.fn();
+        panel = new TimelinePreviewPanel(anchor);
+        panel.init(onNavigate, onSearchChange, onToggleStar);
+        panel.setCompactMode(true);
+        panel.updateMarkers(makeMarkers(5));
+        panel.updateActiveTurn('turn-1');
+        panel.setPinned(true);
+        panel.open();
+        const input = document.querySelector<HTMLInputElement>('.timeline-preview-search input')!;
+        input.value = 'number 2';
+        input.dispatchEvent(new Event('input'));
+        const oldItem = document.querySelector<HTMLElement>('.timeline-preview-item')!;
+        oldItem.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+        panel.close();
+        panel.resetConversation();
+        vi.advanceTimersByTime(1000);
+        oldItem.click();
+
+        expect(panel.isOpen).toBe(false);
+        expect(panel.isPinned).toBe(false);
+        expect(input.value).toBe('');
+        expect(onSearchChange).not.toHaveBeenCalledWith('number 2');
+        expect(onToggleStar).not.toHaveBeenCalled();
+        expect(onNavigate).not.toHaveBeenCalled();
+        expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(0);
+        panel.updateMarkers(makeMarkers(2));
+        panel.open();
+        expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(2);
+        expect(document.querySelector('.timeline-preview-item.active')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('hides every surface and blocks hover, focus and manual opening until restored', () => {
+      panel.setCompactMode(true);
+      panel.open();
+      panel.setSurfaceVisible(false);
+      const panelEl = document.querySelector<HTMLElement>('.timeline-preview-panel')!;
+      const bridge = document.querySelector<HTMLElement>('.gv-timeline-preview-hover-bridge')!;
+      const toggle = document.querySelector<HTMLButtonElement>('.timeline-preview-toggle')!;
+      anchor.dispatchEvent(new MouseEvent('mouseenter'));
+      anchor.dispatchEvent(new FocusEvent('focusin'));
+      anchor.click();
+      panel.open();
+      expect(panel.isOpen).toBe(false);
+      expect(panelEl.hidden).toBe(true);
+      expect(bridge.hidden).toBe(true);
+      expect(toggle.hidden).toBe(true);
+      expect(bridge.classList.contains('gv-timeline-preview-hover-bridge-visible')).toBe(false);
+      panel.setSurfaceVisible(true);
+      anchor.dispatchEvent(new MouseEvent('mouseenter'));
+      expect(panel.isOpen).toBe(true);
+      expect(panelEl.hidden).toBe(false);
+      expect(bridge.hidden).toBe(false);
+    });
+
+    it('cancels a previous hover close before a replacement conversation opens', () => {
+      vi.useFakeTimers();
+      try {
+        panel.setCompactMode(true);
+        anchor.dispatchEvent(new MouseEvent('mouseenter'));
+        anchor.dispatchEvent(new MouseEvent('mouseleave'));
+        panel.resetConversation();
+        panel.updateMarkers(makeMarkers(2));
+        panel.open();
+        vi.advanceTimersByTime(200);
+        expect(panel.isOpen).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('optional long-list window', () => {
+    beforeEach(() => {
+      panel.destroy();
+      panel = new TimelinePreviewPanel(anchor, {
+        virtualizeLongLists: true,
+        historyNotice: 'Loaded messages',
+      });
+      panel.init(onNavigate);
+      const list = document.querySelector<HTMLElement>('.timeline-preview-list')!;
+      Object.defineProperty(list, 'clientHeight', { configurable: true, value: 240 });
+    });
+
+    it('creates only the visible window, releases it on close and renders full short lists', () => {
+      expect(document.querySelector('.gv-timeline-preview-history-notice')?.textContent).toBe(
+        'Loaded messages',
+      );
+      panel.updateMarkers(makeMarkers(500));
+      expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(0);
+      panel.open();
+      expect(document.querySelectorAll('.timeline-preview-item').length).toBeLessThan(20);
+      const list = document.querySelector<HTMLElement>('.timeline-preview-list')!;
+      list.scrollTop = 400 * 48;
+      list.dispatchEvent(new Event('scroll'));
+      document.querySelector<HTMLElement>('[data-turn-id="turn-400"]')!.click();
+      expect(onNavigate).toHaveBeenCalledWith('turn-400', 400);
+      expect(document.querySelectorAll('.timeline-preview-item').length).toBeLessThan(20);
+      panel.close();
+      panel.updateMarkers(makeMarkers(600));
+      expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(0);
+      panel.updateMarkers(makeMarkers(100));
+      panel.open();
+      expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(100);
+      expect(document.querySelector('.gv-timeline-preview-window')).toBeNull();
+    });
+
+    it('rebuilds the visible window after a pinned surface is hidden and restored', () => {
+      vi.useFakeTimers();
+      try {
+        panel.updateMarkers(makeMarkers(500));
+        panel.setPinned(true);
+        panel.open();
+        const input = document.querySelector<HTMLInputElement>('.timeline-preview-search input')!;
+        input.value = 'number 400';
+        input.dispatchEvent(new Event('input'));
+        panel.setSurfaceVisible(false);
+        vi.advanceTimersByTime(1000);
+        expect(panel.isOpen).toBe(false);
+        expect(document.querySelectorAll('.timeline-preview-item')).toHaveLength(0);
+        panel.setSurfaceVisible(true);
+        panel.open();
+        expect(panel.isOpen).toBe(true);
+        expect(document.querySelectorAll('.timeline-preview-item').length).toBeLessThan(20);
+        expect(document.querySelector('[data-turn-id="turn-0"]')).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('mounts an active offscreen row and scrolls the preview viewport to it', () => {
+      panel.updateMarkers(makeMarkers(500));
+      panel.open();
+      panel.updateActiveTurn('turn-450');
+      const item = document.querySelector<HTMLElement>('[data-turn-id="turn-450"]')!;
+      expect(item.classList.contains('active')).toBe(true);
+      expect(
+        document.querySelector<HTMLElement>('.timeline-preview-list')!.scrollTop,
+      ).toBeGreaterThan(440 * 48);
+      expect(document.querySelectorAll('.timeline-preview-item').length).toBeLessThan(20);
+    });
+
+    it('preserves keyboard focus during scrolling and navigates across unmounted rows', () => {
+      panel.updateMarkers(makeMarkers(500));
+      panel.open();
+      const first = document.querySelector<HTMLElement>('[data-turn-id="turn-0"]')!;
+      first.focus();
+      const list = document.querySelector<HTMLElement>('.timeline-preview-list')!;
+      list.scrollTop = 200 * 48;
+      list.dispatchEvent(new Event('scroll'));
+      expect(document.activeElement).toBe(first);
+      first.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      expect((document.activeElement as HTMLElement).dataset.turnId).toBe('turn-499');
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      );
+      expect((document.activeElement as HTMLElement).dataset.turnId).toBe('turn-498');
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      expect(onNavigate).toHaveBeenCalledWith('turn-498', 498);
+      expect(document.querySelectorAll('.timeline-preview-item').length).toBeLessThan(20);
+    });
+
+    it('searches all markers after scrolling while retaining original navigation indices', () => {
+      vi.useFakeTimers();
+      try {
+        panel.updateMarkers(makeMarkers(500));
+        panel.open();
+        const list = document.querySelector<HTMLElement>('.timeline-preview-list')!;
+        list.scrollTop = 400 * 48;
+        list.dispatchEvent(new Event('scroll'));
+        const input = document.querySelector<HTMLInputElement>('.timeline-preview-search input')!;
+        input.value = 'number 450';
+        input.dispatchEvent(new Event('input'));
+        vi.advanceTimersByTime(200);
+        const items = document.querySelectorAll<HTMLElement>('.timeline-preview-item');
+        expect(items).toHaveLength(1);
+        expect(list.scrollTop).toBe(0);
+        items[0].click();
+        expect(onNavigate).toHaveBeenCalledWith('turn-449', 449);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

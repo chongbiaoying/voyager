@@ -155,6 +155,26 @@ Shipped primitives (`verbs/contracts.ts`): `formulaCopy` (since 1.3.0), `vimInpu
 defaulting to the adapter). The formula-copy, Vim and Claude-timeline builtins are now manifests
 that invoke these primitives; the timeline engine lives in `verbs/turnNavigator/TurnNavigator.ts`.
 
+ChatGPT uses the DOM-only `sites/adapters/chatgptTurns.ts` provider, shared with export, and
+`verbs/turnNavigator/chatgptRegistry.ts` for native `cg-<messageId>` identity. Only discovered user
+messages whose shells belong to the current confirmed branch are displayed. Unknown history is
+not fetched; a refresh rebuilds the discovered index from the page. A retained shell can preserve
+its previously discovered summary while its body is unmounted. Navigation owns a cancellable
+three-second request and reports an unavailable target with a retry action. Long prompts align
+their beginning near the viewport top. Compact mode hides the continuous rail background while
+keeping the clickable ticks and hover preview; previews above 100 entries render a window.
+
+Conversation generations guard delayed reads, navigation, long presses and layout callbacks.
+Reading position, preview/search and pending requests are document-local. Formal conversation
+stars retain their existing storage schema and synchronize through storage notifications; temporary
+and unstable-ID stars stay in page memory. Temporary stars are promoted only after the current
+formal conversation's DOM confirms the same native identities, or a trusted first-submission
+record proves creation on an empty page with the matching draft, account route and native user
+identity within ten seconds. Navigation and history traversal cancel this creation record. DOM without a reliable route
+association remains hidden during a handoff rather than persisting stars under an unproven key.
+Legacy `c-...` links/stars resolve only through an unambiguous hash and, for stars, compatible
+stored content. Branch changes never delete stored stars.
+
 Some behaviour cannot be expressed as CSS or as the reversible DOM operations.
 A **primitive** is that behaviour, written once as first-party TypeScript inside
 the extension and given a name a manifest can call:

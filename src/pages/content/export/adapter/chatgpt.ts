@@ -3,19 +3,22 @@ import {
   type ExtractedContent,
 } from '@/features/export/services/DOMContentExtractor';
 import type { ChatTurn } from '@/features/export/types/export';
+import {
+  CHATGPT_ASSISTANT_MESSAGE_SELECTOR as ASSISTANT_MESSAGE_SELECTOR,
+  CHATGPT_IMAGEGEN_SELECTOR as IMAGEGEN_SELECTOR,
+  CHATGPT_USER_MESSAGE_SELECTOR as USER_MESSAGE_SELECTOR,
+  chatgptCollectTurnContainers as collectChatGptDomTurnContainers,
+  findChatGptTurnFrame as findTurnFrame,
+  resolveChatGptTurnRole as resolveTurnRole,
+} from '@/features/plugins/sites/adapters/chatgptTurns';
 
 import { computeConversationFingerprint } from '../topNodePreload';
 import type { ChatGptTurnContainer, ChatGptTurnRole, ExportSelectionOptions } from './type';
 
-const TURN_CONTAINER_SELECTOR = '[data-turn-id-container]';
-// ChatGPT stores virtual-list bookkeeping roots in the same attribute as turns:
-// `client-created-root` for a conversation started in this tab and
-// `paginated-root:<conversation-id>` for one opened from history.
-const NON_TURN_CONTAINER_ID = /-root(?::|$)/;
-const TURN_FRAME_SELECTOR = '[data-turn]';
-const USER_MESSAGE_SELECTOR = '[data-message-author-role="user"]';
-const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]';
-const IMAGEGEN_SELECTOR = '[class*="group/imagegen-image"]';
+/** Preserve the export adapter's existing public return type and entry point. */
+export function chatgptCollectTurnContainers(root: ParentNode = document): ChatGptTurnContainer[] {
+  return collectChatGptDomTurnContainers(root);
+}
 const STOP_GENERATING_SELECTOR = [
   '[data-testid="stop-button"]',
   'button[aria-label*="stop generating" i]',
@@ -33,33 +36,6 @@ const MATERIALIZATION_REPOSITION_MS = 160;
 
 export function isChatGptResponseGenerating(root: ParentNode = document): boolean {
   return root.querySelector(`${STOP_GENERATING_SELECTOR},${STREAMING_TURN_SELECTOR}`) !== null;
-}
-
-function resolveTurnRole(container: HTMLElement): ChatGptTurnRole {
-  if (container.querySelector(USER_MESSAGE_SELECTOR)) {
-    return 'user';
-  }
-
-  if (
-    container.querySelector(ASSISTANT_MESSAGE_SELECTOR) ||
-    container.querySelector(IMAGEGEN_SELECTOR)
-  ) {
-    return 'assistant';
-  }
-
-  return resolveTurnFrameRole(container);
-}
-
-function findTurnFrame(container: HTMLElement): Element | null {
-  return container.matches(TURN_FRAME_SELECTOR)
-    ? container
-    : container.querySelector(TURN_FRAME_SELECTOR);
-}
-
-/** ChatGPT labels the rendered turn frame (`section[data-turn]`) even when it holds no message. */
-function resolveTurnFrameRole(container: HTMLElement): ChatGptTurnRole {
-  const role = findTurnFrame(container)?.getAttribute('data-turn');
-  return role === 'user' || role === 'assistant' ? role : 'unknown';
 }
 
 function mergeExtractedContent(
@@ -92,44 +68,6 @@ function extractSiblingGeneratedImages(
   const imageRoot = document.createElement('div');
   siblingImages.forEach((image) => imageRoot.appendChild(image.cloneNode(true)));
   return DOMContentExtractor.extractAssistantContent(imageRoot);
-}
-
-/**
- * 读取 ChatGPT 虚拟列表保留的顶层对话容器。
- *
- * 容器属性提供稳定身份和完整 DOM 顺序；内部消息 DOM 可能在离开视口时卸载，
- * 因而 role 可暂时为 unknown。
- */
-export function chatgptCollectTurnContainers(root: ParentNode = document): ChatGptTurnContainer[] {
-  const turnsById = new Map<string, ChatGptTurnContainer>();
-
-  for (const container of root.querySelectorAll<HTMLElement>(TURN_CONTAINER_SELECTOR)) {
-    const id = container.getAttribute('data-turn-id-container')?.trim();
-    if (!id || NON_TURN_CONTAINER_ID.test(id)) continue;
-
-    const role = resolveTurnRole(container);
-    const existing = turnsById.get(id);
-    if (!existing) {
-      // The first occurrence establishes ChatGPT's virtual-list order.
-      turnsById.set(id, {
-        id,
-        sequence: turnsById.size,
-        role,
-        container,
-      });
-      continue;
-    }
-
-    // ChatGPT can briefly retain a duplicate container during virtual-list
-    // reconciliation. Both nodes carry the same stable turn ID and represent
-    // one message, so never emit a second record. Prefer the copy with mounted
-    // content when the first occurrence is currently only an empty shell.
-    if (existing.role === 'unknown' && role !== 'unknown') {
-      turnsById.set(id, { ...existing, role, container });
-    }
-  }
-
-  return Array.from(turnsById.values());
 }
 
 /*

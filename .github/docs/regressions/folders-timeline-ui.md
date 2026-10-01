@@ -573,3 +573,24 @@ drop, or hover layout.
   preference; a setting change must not discard values already being entered.
 - **Guard:** `src/pages/content/prompt/__tests__/templateFillAction.test.ts` exercises the real
   manager's fill surface and storage listener, then checks delivery before and after reopening.
+
+## ChatGPT compact rails and navigation have independent lifetimes
+
+- **Trap:** Compact mode retained the outer rail background, and navigation settle callbacks could
+  outlive a new click, a conversation change or manual reading. Static user-bubble selectors also
+  missed retained native shells and the modern UUID round container.
+- **Rule:** ChatGPT compact mode uses `timeline-no-container` while preserving accessible tick
+  buttons. Empty or unconfirmed conversations hide every surface. Each navigation request owns
+  its listeners/timers, validates current membership and session identity, expires after about
+  three seconds and yields to chat scrolling. Dense ChatGPT ticks paint a spaced sample while
+  preserving every accessible round, active tick and star. A long prompt containing the reading
+  anchor remains active even when its center is farther away than the previous prompt.
+  Observe growing message shells and bubbles as well as the fixed viewport, removing retired
+  branch targets; observing only main and its fixed-height children misses image/layout changes.
+  The preview above 100 entries renders a window
+  without changing the user's search or reading position on star-only updates.
+- **Guard:** `src/features/plugins/verbs/turnNavigator/chatgptNavigation.test.ts`,
+  `src/features/plugins/verbs/turnNavigatorRenderingIntegration.test.ts`,
+  `src/features/plugins/verbs/turnNavigator/timelineLayout.test.ts`,
+  `src/features/plugins/verbs/turnNavigatorSessionIntegration.test.ts` and
+  `src/pages/content/timeline/__tests__/TimelinePreviewPanel.test.ts`.

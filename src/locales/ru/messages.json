@@ -3117,5 +3117,21 @@
   "popupPinHintDismiss": {
     "message": "Закрыть",
     "description": "Popup: dismiss the pin reminder"
+  },
+  "timelineNavigationPending": {
+    "message": "Поиск сообщения…",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationUnavailable": {
+    "message": "Не удалось найти это сообщение. Можно попробовать ещё раз.",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationRetry": {
+    "message": "Повторить",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineHistoryLoadedOnly": {
+    "message": "Индексируются только загруженные сообщения.",
+    "description": "ChatGPT timeline navigation feedback"
   }
 }

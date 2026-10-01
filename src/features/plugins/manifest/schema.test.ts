@@ -20,7 +20,7 @@
  * exactly the keywords these two schemas use.
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -228,7 +228,7 @@ function listBundledPlugins(): readonly BundledPlugin[] {
     for (const plugin of listDirs(join(catalogSites, site, 'plugins'))) {
       const dir = join(catalogSites, site, 'plugins', plugin);
       plugins.push({
-        label: relative(repoRoot, dir),
+        label: relative(repoRoot, dir).split(sep).join('/'),
         dir,
         raw: readJson(join(dir, 'plugin.json')) as Record<string, unknown>,
       });

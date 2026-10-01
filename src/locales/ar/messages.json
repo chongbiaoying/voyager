@@ -3117,5 +3117,21 @@
   "popupPinHintDismiss": {
     "message": "إغلاق",
     "description": "Popup: dismiss the pin reminder"
+  },
+  "timelineNavigationPending": {
+    "message": "جارٍ تحديد موقع الرسالة…",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationUnavailable": {
+    "message": "تعذّر تحديد موقع هذه الرسالة. يمكنك المحاولة مجددًا.",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineNavigationRetry": {
+    "message": "إعادة المحاولة",
+    "description": "ChatGPT timeline navigation feedback"
+  },
+  "timelineHistoryLoadedOnly": {
+    "message": "تُفهرس الرسائل المحمّلة فقط.",
+    "description": "ChatGPT timeline navigation feedback"
   }
 }
